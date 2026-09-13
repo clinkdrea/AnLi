@@ -32,7 +32,7 @@ export default function AITab({ caseId }: { caseId: string }) {
   };
 
   return (
-    <div className="flex flex-col h-[600px]">
+    <div className="flex flex-col h-full">
       <div className="flex-1 overflow-auto bg-white rounded shadow p-4 space-y-3">
         {messages.length === 0 && (
           <div className="text-center text-slate-400 py-12">

@@ -44,9 +44,15 @@ export function initDb() {
     CREATE TABLE IF NOT EXISTS case_parties (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
-      side TEXT NOT NULL CHECK(side IN ('our','opponent','third')),
+      side TEXT NOT NULL CHECK(side IN ('our','opponent','third','court','contact')),
       name TEXT NOT NULL,
       party_type TEXT NOT NULL CHECK(party_type IN ('natural','legal')),
+      id_number TEXT,
+      phone TEXT,
+      address TEXT,
+      organization TEXT,
+      role TEXT,
+      remark TEXT,
       contact TEXT,
       relation TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -106,6 +112,7 @@ export function initDb() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
       stage_id INTEGER REFERENCES case_stages(id),
+      sort_order INTEGER NOT NULL DEFAULT 0,
       content TEXT NOT NULL,
       author_id INTEGER NOT NULL REFERENCES users(id),
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -244,6 +251,48 @@ export function initDb() {
       SELECT id, name, category, COALESCE(content, ''), placeholders, NULL, NULL, 0, creator_id, created_at FROM templates;
       DROP TABLE templates;
       ALTER TABLE templates_new RENAME TO templates;
+    `);
+  }
+
+  // 老库迁移：cases 补充法院/开庭时间/案情简介
+  const caseCols = db.prepare('PRAGMA table_info(cases)').all() as { name: string }[];
+  const caseColSet = new Set(caseCols.map((c) => c.name));
+  if (!caseColSet.has('court')) db.exec("ALTER TABLE cases ADD COLUMN court TEXT");
+  if (!caseColSet.has('hearing_date')) db.exec("ALTER TABLE cases ADD COLUMN hearing_date TEXT");
+  if (!caseColSet.has('summary')) db.exec("ALTER TABLE cases ADD COLUMN summary TEXT");
+
+  // 老库迁移：case_notes 补充排序字段
+  const noteCols = db.prepare('PRAGMA table_info(case_notes)').all() as { name: string }[];
+  if (!noteCols.some((c) => c.name === 'sort_order')) {
+    db.exec('ALTER TABLE case_notes ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0');
+  }
+
+  // 老库迁移：case_parties 扩展分类与结构化字段（CHECK 约束变更需重建表）
+  const partyCols = db.prepare('PRAGMA table_info(case_parties)').all() as { name: string }[];
+  const partyColSet = new Set(partyCols.map((c) => c.name));
+  const needPartyRebuild = !partyColSet.has('id_number') || !partyColSet.has('organization');
+  if (needPartyRebuild) {
+    db.exec(`
+      CREATE TABLE case_parties_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+        side TEXT NOT NULL CHECK(side IN ('our','opponent','third','court','contact')),
+        name TEXT NOT NULL,
+        party_type TEXT NOT NULL CHECK(party_type IN ('natural','legal')),
+        id_number TEXT,
+        phone TEXT,
+        address TEXT,
+        organization TEXT,
+        role TEXT,
+        remark TEXT,
+        contact TEXT,
+        relation TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO case_parties_new (id, case_id, side, name, party_type, phone, contact, relation, created_at)
+      SELECT id, case_id, side, name, party_type, contact, contact, relation, created_at FROM case_parties;
+      DROP TABLE case_parties;
+      ALTER TABLE case_parties_new RENAME TO case_parties;
     `);
   }
 }

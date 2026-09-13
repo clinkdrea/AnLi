@@ -4,7 +4,7 @@ export function logAudit(
   userId: number | null,
   action: string,
   objectType?: string,
-  objectId?: string | number,
+  objectId?: string | number | bigint | null,
   detail?: string
 ) {
   db.prepare(

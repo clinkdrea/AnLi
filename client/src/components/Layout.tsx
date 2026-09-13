@@ -1,5 +1,5 @@
 import { Link, useLocation } from 'react-router-dom';
-import { LayoutDashboard, Briefcase, LogOut, Scale, Search, ShieldAlert, FileText, BookOpen, Shield } from 'lucide-react';
+import { LayoutDashboard, Briefcase, LogOut, Scale, Search, ShieldAlert, FileText, BookOpen, Shield, UserCog } from 'lucide-react';
 import { api } from '../api';
 import NotificationBell from './NotificationBell';
 
@@ -15,10 +15,17 @@ export default function Layout({ user, onLogout, children }: any) {
   ];
   if (user.role === 'admin') {
     nav.push({ to: '/audit', icon: Shield, label: '审计日志' });
+    nav.push({ to: '/users', icon: UserCog, label: '用户管理' });
   }
   const logout = async () => {
-    await api('/auth/logout', { method: 'POST' });
-    onLogout();
+    // 无论接口成败都清除前端登录态，避免被网络/服务端异常卡住无法退出
+    try {
+      await api('/auth/logout', { method: 'POST' });
+    } catch {
+      // 忽略：即使后端清理失败，前端也必须退出
+    } finally {
+      onLogout();
+    }
   };
   return (
     <div className="flex h-screen">

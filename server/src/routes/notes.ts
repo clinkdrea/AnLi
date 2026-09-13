@@ -15,7 +15,7 @@ export default async function noteRoutes(app: FastifyInstance) {
        FROM case_notes n
        LEFT JOIN users u ON n.author_id = u.id
        LEFT JOIN case_stages s ON n.stage_id = s.id
-       WHERE n.case_id = ? ORDER BY n.created_at DESC`
+       WHERE n.case_id = ? ORDER BY n.sort_order, n.id`
     ).all(cid);
     return { notes };
   });
@@ -35,7 +35,7 @@ export default async function noteRoutes(app: FastifyInstance) {
     return reply.status(201).send({ id: Number(info.lastInsertRowid) });
   });
 
-  // 更新案情记录
+  // 更新案情记录（拆分 content 与 stage_id 独立更新）
   app.put('/api/notes/:noteId', async (req, reply) => {
     const nid = Number((req.params as any).noteId);
     const note = db.prepare('SELECT * FROM case_notes WHERE id = ?').get(nid) as any;
@@ -43,10 +43,35 @@ export default async function noteRoutes(app: FastifyInstance) {
     if (req.user!.role !== 'admin' && !isCaseMember(req.user!.id, note.case_id)) {
       return reply.status(403).send({ error: '无权访问' });
     }
-    const { content } = req.body as any;
-    if (!content?.trim()) return reply.status(400).send({ error: '内容不能为空' });
-    db.prepare('UPDATE case_notes SET content = ? WHERE id = ?').run(content.trim(), nid);
+    const { content, stage_id } = req.body as any;
+    if (content !== undefined) {
+      if (!content?.trim()) return reply.status(400).send({ error: '内容不能为空' });
+      db.prepare('UPDATE case_notes SET content = ? WHERE id = ?').run(content.trim(), nid);
+    }
+    if (stage_id !== undefined) {
+      db.prepare('UPDATE case_notes SET stage_id = ? WHERE id = ?').run(stage_id || null, nid);
+    }
     logAudit(req.user!.id, 'note_update', 'case_note', nid);
+    return { ok: true };
+  });
+
+  // 案情记录拖拽排序（支持跨阶段移动）
+  app.put('/api/cases/:id/notes/reorder', async (req, reply) => {
+    const cid = Number((req.params as any).id);
+    if (req.user!.role !== 'admin' && !isCaseMember(req.user!.id, cid)) {
+      return reply.status(403).send({ error: '无权访问' });
+    }
+    const { items } = req.body as { items: { id: number; stage_id: number | null }[] };
+    if (!Array.isArray(items)) return reply.status(400).send({ error: '参数错误' });
+    const upd = db.prepare('UPDATE case_notes SET sort_order = ?, stage_id = ? WHERE id = ? AND case_id = ?');
+    db.exec('BEGIN');
+    try {
+      items.forEach((it, i) => upd.run(i, it.stage_id ?? null, it.id, cid));
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      return reply.status(500).send({ error: '排序失败' });
+    }
     return { ok: true };
   });
 

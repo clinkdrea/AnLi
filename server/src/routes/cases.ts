@@ -14,7 +14,14 @@ function genCaseNo(type: string): string {
   return `${year}-${prefix}-${seq}`;
 }
 
+interface ContactInput {
+  category?: string; side?: string; name: string; party_type?: string;
+  id_number?: string; phone?: string; address?: string;
+  organization?: string; role?: string; remark?: string;
+}
+
 export default async function caseRoutes(app: FastifyInstance) {
+  // 案件列表：关键字搜名称/编号/法院/案号/当事人姓名，支持类型与状态筛选
   app.get('/api/cases', async (req) => {
     const { type, status, keyword } = req.query as any;
     let sql = `SELECT c.*, u.name as lead_name FROM cases c LEFT JOIN users u ON c.lead_id = u.id WHERE 1=1`;
@@ -25,12 +32,21 @@ export default async function caseRoutes(app: FastifyInstance) {
     }
     if (type) { sql += ` AND c.type = ?`; params.push(type); }
     if (status) { sql += ` AND c.status = ?`; params.push(status); }
-    if (keyword) { sql += ` AND c.name LIKE ?`; params.push(`%${keyword}%`); }
+    if (keyword?.trim()) {
+      const kw = `%${keyword.trim()}%`;
+      sql += ` AND (
+        c.name LIKE ? OR c.case_no LIKE ? OR c.court LIKE ?
+        OR (SELECT court_case_no FROM case_legal_info WHERE case_id = c.id) LIKE ?
+        OR EXISTS (SELECT 1 FROM case_parties p WHERE p.case_id = c.id AND p.name LIKE ?)
+      )`;
+      params.push(kw, kw, kw, kw, kw);
+    }
     sql += ` ORDER BY c.created_at DESC`;
     const cases = db.prepare(sql).all(...params);
     return { cases, typeLabels: CASE_TYPE_LABELS };
   });
 
+  // 案件详情
   app.get('/api/cases/:id', async (req, reply) => {
     const { id } = req.params as { id: string };
     const cid = Number(id);
@@ -49,16 +65,23 @@ export default async function caseRoutes(app: FastifyInstance) {
     return { case: caseRow, parties, related, legal, stages, members };
   });
 
+  // 创建案件：联系人按分类提交（我方/对方/第三人/法院人员/其他联系人）
   app.post('/api/cases', async (req, reply) => {
     const role = req.user!.role;
     if (role !== 'admin' && role !== 'lead') {
       return reply.status(403).send({ error: '仅管理员与主办律师可创建案件' });
     }
     const body = req.body as any;
-    const { name, type, parties, relatedParties, legal, stages } = body;
-    if (!name || !type || !parties?.our?.name || !parties?.opponent?.name) {
-      return reply.status(400).send({ error: '案件名称、类型、我方/对方当事人为必填' });
+    const { name, type, court, hearing_date, hearing_at, summary, cause, court_case_no, amount, entrust_start, contacts } = body;
+    const hearingDate = hearing_date || hearing_at || null;
+    if (!name?.trim() || !type) return reply.status(400).send({ error: '案件名称与类型为必填' });
+    const list: ContactInput[] = Array.isArray(contacts) ? contacts : [];
+    const hasOur = list.some((c) => c.category === 'our' && c.name?.trim());
+    const hasOpp = list.some((c) => c.category === 'opponent' && c.name?.trim());
+    if (!hasOur || !hasOpp) {
+      return reply.status(400).send({ error: '我方与对方当事人为必填' });
     }
+
     const caseNo = genCaseNo(type);
     const folderName = `${caseNo}-${name}`;
     const folderPath = path.join(CASES_DIR, folderName);
@@ -67,27 +90,29 @@ export default async function caseRoutes(app: FastifyInstance) {
     db.exec('BEGIN');
     try {
       const info = db.prepare(
-        'INSERT INTO cases (case_no, name, type, lead_id, folder_path) VALUES (?, ?, ?, ?, ?)'
-      ).run(caseNo, name, type, req.user!.id, folderPath);
+        'INSERT INTO cases (case_no, name, type, lead_id, folder_path, court, hearing_date, summary) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+      ).run(caseNo, name.trim(), type, req.user!.id, folderPath, court || null, hearingDate, summary || null);
       const cid = Number(info.lastInsertRowid);
 
       const insParty = db.prepare(
-        'INSERT INTO case_parties (case_id, side, name, party_type, contact, relation) VALUES (?, ?, ?, ?, ?, ?)'
+        `INSERT INTO case_parties (case_id, side, name, party_type, id_number, phone, address, organization, role, remark)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       );
-      insParty.run(cid, 'our', parties.our.name, parties.our.party_type || 'natural', parties.our.contact || null, parties.our.relation || null);
-      insParty.run(cid, 'opponent', parties.opponent.name, parties.opponent.party_type || 'natural', parties.opponent.contact || null, parties.opponent.relation || null);
-      for (const t of parties.third || []) {
-        insParty.run(cid, 'third', t.name, t.party_type || 'natural', t.contact || null, t.relation || null);
+      for (const c of list) {
+        if (!c.name?.trim()) continue;
+        const side = c.category || 'contact';
+        // 法院人员/其他联系人默认自然人；当事人可选自然人/法人
+        const ptype = (side === 'our' || side === 'opponent' || side === 'third') ? (c.party_type || 'natural') : 'natural';
+        insParty.run(cid, side, c.name.trim(), ptype,
+          c.id_number || null, c.phone || null, c.address || null,
+          c.organization || null, c.role || null, c.remark || null);
       }
-
-      const insRel = db.prepare('INSERT INTO related_parties (case_id, name, relation_type) VALUES (?, ?, ?)');
-      for (const r of relatedParties || []) insRel.run(cid, r.name, r.relation_type);
 
       db.prepare(
         'INSERT INTO case_legal_info (case_id, cause, court_case_no, amount, entrust_start) VALUES (?, ?, ?, ?, ?)'
-      ).run(cid, legal?.cause || null, legal?.court_case_no || null, legal?.amount || null, legal?.entrust_start || null);
+      ).run(cid, cause || null, court_case_no || null, amount || null, entrust_start || null);
 
-      const stageList = stages?.length ? stages : STAGE_TEMPLATES[type] || STAGE_TEMPLATES.other;
+      const stageList = STAGE_TEMPLATES[type] || STAGE_TEMPLATES.other;
       const insStage = db.prepare('INSERT INTO case_stages (case_id, name, sort_order) VALUES (?, ?, ?)');
       stageList.forEach((s: string, i: number) => insStage.run(cid, s, i));
 
@@ -101,6 +126,105 @@ export default async function caseRoutes(app: FastifyInstance) {
     }
   });
 
+  // 编辑案件基本信息
+  app.patch('/api/cases/:id', async (req, reply) => {
+    const cid = Number((req.params as any).id);
+    const caseRow = db.prepare('SELECT * FROM cases WHERE id = ?').get(cid) as any;
+    if (!caseRow) return reply.status(404).send({ error: '案件不存在' });
+    if (req.user!.role !== 'admin' && !isCaseMember(req.user!.id, cid)) {
+      return reply.status(403).send({ error: '无权访问该案件' });
+    }
+    const b = req.body as any;
+    const fields: string[] = [];
+    const params: any[] = [];
+    for (const k of ['name', 'court', 'hearing_date', 'summary']) {
+      if (b[k] !== undefined) { fields.push(`${k} = ?`); params.push(b[k] || null); }
+    }
+    if (fields.length) {
+      db.prepare(`UPDATE cases SET ${fields.join(', ')} WHERE id = ?`).run(...params, cid);
+    }
+    // 法律信息：案由/案号
+    const legalFields: string[] = [];
+    const legalParams: any[] = [];
+    for (const k of ['cause', 'court_case_no']) {
+      if (b[k] !== undefined) { legalFields.push(`${k} = ?`); legalParams.push(b[k] || null); }
+    }
+    if (legalFields.length) {
+      db.prepare(`UPDATE case_legal_info SET ${legalFields.join(', ')} WHERE case_id = ?`).run(...legalParams, cid);
+    }
+    logAudit(req.user!.id, 'case_update', 'case', cid);
+    return { ok: true };
+  });
+
+  // ---- 联系人（当事人/法院人员等）CRUD ----
+
+  // 新增联系人
+  app.post('/api/cases/:id/parties', async (req, reply) => {
+    const cid = Number((req.params as any).id);
+    if (req.user!.role !== 'admin' && !isCaseMember(req.user!.id, cid)) {
+      return reply.status(403).send({ error: '无权访问该案件' });
+    }
+    const b = req.body as ContactInput;
+    if (!b.name?.trim()) return reply.status(400).send({ error: '姓名/名称必填' });
+    const side = b.category || b.side || 'contact';
+    const ptype = (side === 'our' || side === 'opponent' || side === 'third') ? (b.party_type || 'natural') : 'natural';
+    const info = db.prepare(
+      `INSERT INTO case_parties (case_id, side, name, party_type, id_number, phone, address, organization, role, remark)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(cid, side, b.name.trim(), ptype, b.id_number || null, b.phone || null,
+      b.address || null, b.organization || null, b.role || null, b.remark || null);
+    logAudit(req.user!.id, 'party_create', 'case_party', Number(info.lastInsertRowid), `case=${cid}`);
+    return reply.status(201).send({ id: Number(info.lastInsertRowid) });
+  });
+
+  // 编辑联系人
+  app.put('/api/parties/:pid', async (req, reply) => {
+    const pid = Number((req.params as any).pid);
+    const party = db.prepare('SELECT * FROM case_parties WHERE id = ?').get(pid) as any;
+    if (!party) return reply.status(404).send({ error: '联系人不存在' });
+    if (req.user!.role !== 'admin' && !isCaseMember(req.user!.id, party.case_id)) {
+      return reply.status(403).send({ error: '无权访问' });
+    }
+    const b = req.body as any;
+    const map: Record<string, any> = {
+      name: b.name, party_type: b.party_type, id_number: b.id_number, phone: b.phone,
+      address: b.address, organization: b.organization, role: b.role, remark: b.remark,
+    };
+    const fields: string[] = [];
+    const params: any[] = [];
+    for (const [k, v] of Object.entries(map)) {
+      if (v !== undefined) { fields.push(`${k} = ?`); params.push(v || null); }
+    }
+    if (fields.length) {
+      db.prepare(`UPDATE case_parties SET ${fields.join(', ')} WHERE id = ?`).run(...params, pid);
+      logAudit(req.user!.id, 'party_update', 'case_party', pid);
+    }
+    return { ok: true };
+  });
+
+  // 删除联系人
+  app.delete('/api/parties/:pid', async (req, reply) => {
+    const pid = Number((req.params as any).pid);
+    const party = db.prepare('SELECT * FROM case_parties WHERE id = ?').get(pid) as any;
+    if (!party) return reply.status(404).send({ error: '联系人不存在' });
+    if (req.user!.role !== 'admin' && !isCaseMember(req.user!.id, party.case_id)) {
+      return reply.status(403).send({ error: '无权访问' });
+    }
+    db.prepare('DELETE FROM case_parties WHERE id = ?').run(pid);
+    logAudit(req.user!.id, 'party_delete', 'case_party', pid, party.name);
+    return { ok: true };
+  });
+
+  // 可分配用户列表（主办律师或管理员添加案件成员时使用）
+  app.get('/api/users/assignable', async (req, reply) => {
+    if (req.user!.role !== 'admin' && req.user!.role !== 'lead') {
+      return reply.status(403).send({ error: '仅主办律师或管理员可获取用户列表' });
+    }
+    const users = db.prepare("SELECT id, name, role FROM users WHERE status = 'active' ORDER BY id").all();
+    return { users };
+  });
+
+  // 添加成员
   app.post('/api/cases/:id/members', async (req, reply) => {
     const { id } = req.params as { id: string };
     const cid = Number(id);
@@ -115,6 +239,22 @@ export default async function caseRoutes(app: FastifyInstance) {
     return { ok: true };
   });
 
+  // 移除成员（不能移除主办律师）
+  app.delete('/api/cases/:id/members/:userId', async (req, reply) => {
+    const cid = Number((req.params as any).id);
+    const uid = Number((req.params as any).userId);
+    const caseRow = db.prepare('SELECT lead_id FROM cases WHERE id = ?').get(cid) as any;
+    if (!caseRow) return reply.status(404).send({ error: '案件不存在' });
+    if (req.user!.role !== 'admin' && caseRow.lead_id !== req.user!.id) {
+      return reply.status(403).send({ error: '仅主办律师或管理员可管理成员' });
+    }
+    if (uid === caseRow.lead_id) return reply.status(400).send({ error: '不能移除主办律师' });
+    db.prepare('DELETE FROM case_members WHERE case_id = ? AND user_id = ?').run(cid, uid);
+    logAudit(req.user!.id, 'case_remove_member', 'case', cid, `user=${uid}`);
+    return { ok: true };
+  });
+
+  // 结案
   app.post('/api/cases/:id/close', async (req, reply) => {
     const { id } = req.params as { id: string };
     const cid = Number(id);

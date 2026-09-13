@@ -25,7 +25,7 @@ export function signToken(user: AuthUser) {
 export function authPlugin(app: FastifyInstance) {
   app.decorateRequest('user', null);
   app.addHook('preHandler', async (req: FastifyRequest, reply: FastifyReply) => {
-    if (req.url === '/api/auth/login' || req.url === '/api/health') return;
+    if (req.url === '/api/auth/login' || req.url === '/api/auth/logout' || req.url === '/api/health') return;
     const token = req.cookies?.token || (req.headers.authorization?.replace('Bearer ', ''));
     if (!token) { reply.status(401).send({ error: '未登录' }); return; }
     try {

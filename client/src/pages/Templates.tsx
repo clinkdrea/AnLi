@@ -122,7 +122,7 @@ export default function TemplatesPage() {
                     {expanded[top.name] ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
                   </button>
                   <button onClick={() => { setSelected({ top: top.name }); load({ top: top.name }, q); }}
-                    className={`flex-1 text-left py-2 pr-2 text-sm truncate ${selected?.top === top.name && !selected.sub ? 'bg-amber-100 text-amber-800 font-medium rounded' : 'hover:bg-slate-50'}`}>
+                    className={`flex-1 text-left py-2 pr-2 text-sm truncate ${selected?.top === top.name && !selected?.sub ? 'bg-amber-100 text-amber-800 font-medium rounded' : 'hover:bg-slate-50'}`}>
                     {top.name} <span className="text-xs text-slate-400">({top.count})</span>
                   </button>
                   <button title="在 Finder 中打开此分类" onClick={() => openFolder(top.name)}
@@ -135,7 +135,7 @@ export default function TemplatesPage() {
                     {Object.entries(top.children).map(([sub, count]) => (
                       <button key={sub} onClick={() => { setSelected({ top: top.name, sub }); load({ top: top.name, sub }, q); }}
                         className={`w-full text-left px-2 py-1.5 text-xs truncate rounded ${selected?.sub === sub ? 'bg-amber-100 text-amber-800' : 'text-slate-600 hover:bg-slate-50'}`}>
-                        {sub} <span className="text-slate-400">({count})</span>
+                        {sub} <span className="text-slate-400">({String(count)})</span>
                       </button>
                     ))}
                   </div>

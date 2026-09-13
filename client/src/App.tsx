@@ -11,6 +11,7 @@ import Conflict from './pages/Conflict';
 import Templates from './pages/Templates';
 import Knowledge from './pages/Knowledge';
 import Audit from './pages/Audit';
+import Users from './pages/Users';
 
 export default function App() {
   const [user, setUser] = useState<any>(null);
@@ -34,6 +35,7 @@ export default function App() {
         <Route path="/templates" element={<Templates />} />
         <Route path="/knowledge" element={<Knowledge />} />
         <Route path="/audit" element={<Audit />} />
+        <Route path="/users" element={<Users />} />
         <Route path="*" element={<Navigate to="/" />} />
       </Routes>
     </Layout>
