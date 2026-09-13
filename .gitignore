@@ -1,0 +1,32 @@
+# 依赖
+node_modules/
+
+# 构建产物
+dist/
+client/dist/
+server/dist/
+
+# ===== 敏感数据（禁止上传 GitHub）=====
+# 数据库（账号、当事人、案件信息）
+data/
+/server/data/
+*.db
+*.db-shm
+*.db-wal
+*.db.gz
+
+# 环境变量与密钥
+.env
+.env.*
+!.env.example
+
+# 上传/导出/备份文件
+exports/
+backups/
+
+# OCR 编译产物（由 ocr.swift 编译生成）
+server/scripts/ocr
+
+# 系统与日志
+*.log
+.DS_Store
