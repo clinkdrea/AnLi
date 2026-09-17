@@ -26,13 +26,15 @@ export default async function taskRoutes(app: FastifyInstance) {
     const includeExpired = q.include_expired === '1';
     // 默认只显示 todo + done（隐藏 expired）；include_expired=1 显示全部
     const statusFilter = includeExpired ? '' : " AND t.status != 'expired'";
+    // 单案件任务软上限 500 条，避免极端情况下一次性加载过多
     const tasks = db.prepare(
       `SELECT t.*, u.name as assignee_name, s.name as stage_name
        FROM tasks t
        LEFT JOIN users u ON t.assignee_id = u.id
        LEFT JOIN case_stages s ON t.stage_id = s.id
        WHERE t.case_id = ?${statusFilter}
-       ORDER BY ${(sort === 'due_date' ? '(t.due_date IS NULL), t.due_date' : 't.created_at')} ${order}`
+       ORDER BY ${(sort === 'due_date' ? '(t.due_date IS NULL), t.due_date' : 't.created_at')} ${order}
+       LIMIT 500`
     ).all(cid);
     return { tasks };
   });
