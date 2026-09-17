@@ -4,6 +4,7 @@ import { api } from './api';
 import Login from './pages/Login';
 import Layout from './components/Layout';
 import Dashboard from './pages/Dashboard';
+import Todos from './pages/Todos';
 import Cases from './pages/Cases';
 import CaseDetail from './pages/CaseDetail';
 import Search from './pages/Search';
@@ -28,6 +29,7 @@ export default function App() {
     <Layout user={user} onLogout={() => setUser(null)}>
       <Routes>
         <Route path="/" element={<Dashboard />} />
+        <Route path="/todos" element={<Todos />} />
         <Route path="/cases" element={<Cases />} />
         <Route path="/cases/:id" element={<CaseDetail />} />
         <Route path="/search" element={<Search />} />

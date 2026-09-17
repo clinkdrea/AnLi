@@ -1,32 +1,29 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { Search } from 'lucide-react';
 import { api } from '../api';
 import NewCaseModal from '../components/NewCaseModal';
+import { CASE_TYPE_LABELS, CASE_STATUS_LABELS, typeLabel } from '../constants';
 
-const TYPES: Record<string, string> = {
-  civil: '民事', civil_appeal: '民事二审', civil_retrial: '民事再审', criminal: '刑事',
-  administrative: '行政', arbitration: '仲裁', enforcement: '执行',
-  nonlitigation: '非诉专项', legal_advisor: '常年法律顾问', other: '其他',
-};
-const STATUS: Record<string, string> = { active: '办理中', closed: '已结案', archived: '已归档' };
+const STATUS = CASE_STATUS_LABELS;
 
 export default function Cases() {
+  const [params] = useSearchParams();
   const [cases, setCases] = useState<any[]>([]);
   const [showNew, setShowNew] = useState(false);
-  const [keyword, setKeyword] = useState('');
+  const [keyword, setKeyword] = useState(params.get('kw') || '');
   const [type, setType] = useState('');
   const [status, setStatus] = useState('');
 
   const load = (kw = keyword, t = type, s = status) => {
-    const params = new URLSearchParams();
-    if (kw.trim()) params.set('keyword', kw.trim());
-    if (t) params.set('type', t);
-    if (s) params.set('status', s);
-    const qs = params.toString();
+    const p = new URLSearchParams();
+    if (kw.trim()) p.set('keyword', kw.trim());
+    if (t) p.set('type', t);
+    if (s) p.set('status', s);
+    const qs = p.toString();
     api('/cases' + (qs ? `?${qs}` : '')).then((r) => setCases(r.cases));
   };
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(keyword); }, []);
 
   const statusBadge = (s: string) => ({
     active: 'bg-green-100 text-green-700',
@@ -54,7 +51,7 @@ export default function Cases() {
         <select value={type} onChange={(e) => { setType(e.target.value); load(keyword, e.target.value, status); }}
           className="border border-slate-300 rounded px-3 py-2 text-sm">
           <option value="">全部类型</option>
-          {Object.entries(TYPES).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+          {Object.entries(CASE_TYPE_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
         </select>
         <select value={status} onChange={(e) => { setStatus(e.target.value); load(keyword, type, e.target.value); }}
           className="border border-slate-300 rounded px-3 py-2 text-sm">
@@ -87,7 +84,7 @@ export default function Cases() {
               <tr key={c.id} className="border-t hover:bg-slate-50">
                 <td className="px-4 py-3 text-slate-500">{c.case_no}</td>
                 <td className="px-4 py-3"><Link to={`/cases/${c.id}`} className="text-amber-600 hover:underline">{c.name}</Link></td>
-                <td className="px-4 py-3">{TYPES[c.type] || c.type}</td>
+                <td className="px-4 py-3">{typeLabel(c.type)}</td>
                 <td className="px-4 py-3 text-slate-500">{c.court || '—'}</td>
                 <td className="px-4 py-3 text-slate-500">{c.hearing_date ? c.hearing_date.replace('T', ' ').slice(0, 16) : '—'}</td>
                 <td className="px-4 py-3">{c.lead_name}</td>

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { ArrowLeft, PanelRightClose, PanelRightOpen, Pencil, X, Plus } from 'lucide-react';
 import { api } from '../api';
 import FilesTab from '../components/case/FilesTab';
@@ -11,11 +11,12 @@ import EvidencesTab from '../components/case/EvidencesTab';
 import ContactsTab from '../components/case/ContactsTab';
 import AITab from '../components/case/AITab';
 
-const TABS = ['看板', '资料', '证据清单', '任务', '时间轴', '联系人', '概览'];
+const TABS = ['概览', '看板', '任务', '时间轴', '文书资料', '证据清单'];
 
 export default function CaseDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const [data, setData] = useState<any>(null);
   const [tab, setTab] = useState(0);
   const [err, setErr] = useState('');
@@ -24,6 +25,14 @@ export default function CaseDetail() {
 
   const load = () => api(`/cases/${id}`).then(setData).catch((e) => setErr(e.message));
   useEffect(() => { load(); }, [id]);
+
+  // 从哪来回哪去：有站内浏览历史则回上一页（看板/案件列表/搜索结果等），
+  // 新标签页或直接打开链接（无历史）时兜底回概览看板
+  // 使用 React Router v6 公开 API：location.key === 'default' 表示初始条目（无可回退历史）
+  const goBack = () => {
+    if (location.key !== 'default') navigate(-1);
+    else navigate('/');
+  };
 
   if (err) return <div className="p-8 text-red-500">{err}</div>;
   if (!data) return <div className="p-8">加载中...</div>;
@@ -35,7 +44,7 @@ export default function CaseDetail() {
       {/* 主区 */}
       <div className="flex-1 min-w-0 overflow-y-auto p-8">
         <div className="flex items-baseline gap-3 mb-1">
-          <button onClick={() => navigate(-1)}
+          <button onClick={goBack}
             title="返回"
             className="self-center text-slate-400 hover:text-amber-600 p-1 -ml-2">
             <ArrowLeft className="w-5 h-5" />
@@ -69,13 +78,12 @@ export default function CaseDetail() {
           ))}
         </div>
         <div className="mt-4">
-          {tab === 0 && <BoardTab caseId={id!} />}
-          {tab === 1 && <FilesTab caseId={id!} onChanged={load} />}
-          {tab === 2 && <EvidencesTab caseId={id!} />}
-          {tab === 3 && <TasksTab caseId={id!} />}
-          {tab === 4 && <TimelineTab caseId={id!} />}
-          {tab === 5 && <ContactsTab caseId={id!} parties={data.parties} onChanged={load} />}
-          {tab === 6 && <Overview data={data} onChanged={load} onGoBoard={() => setTab(0)} onGoContacts={() => setTab(5)} />}
+          {tab === 0 && <Overview data={data} onChanged={load} onGoBoard={() => setTab(1)} />}
+          {tab === 1 && <BoardTab caseId={id!} />}
+          {tab === 2 && <TasksTab caseId={id!} />}
+          {tab === 3 && <TimelineTab caseId={id!} />}
+          {tab === 4 && <FilesTab caseId={id!} onChanged={load} />}
+          {tab === 5 && <EvidencesTab caseId={id!} />}
         </div>
       </div>
 
@@ -101,7 +109,7 @@ export default function CaseDetail() {
   );
 }
 
-function Overview({ data, onChanged, onGoBoard, onGoContacts }: any) {
+function Overview({ data, onChanged, onGoBoard }: any) {
   const { case: c, parties, stages, members, legal } = data;
   const [me, setMe] = useState<any>(null);
   const [editing, setEditing] = useState(false);
@@ -112,6 +120,7 @@ function Overview({ data, onChanged, onGoBoard, onGoContacts }: any) {
   const [candidates, setCandidates] = useState<any[]>([]);
   const [pick, setPick] = useState('');
   const [memberMsg, setMemberMsg] = useState('');
+  const [statusMsg, setStatusMsg] = useState('');
 
   useEffect(() => { api('/auth/me').then((r) => setMe(r.user)).catch(() => {}); }, []);
 
@@ -178,9 +187,23 @@ function Overview({ data, onChanged, onGoBoard, onGoContacts }: any) {
     }
   };
 
+  const changeStatus = async (status: string) => {
+    if (status === c.status) return;
+    const label: Record<string, string> = { active: '办理中', closed: '已结案', archived: '已归档' };
+    if (!confirm(`确认将案件状态变更为「${label[status]}」？`)) return;
+    setStatusMsg('');
+    try {
+      await api(`/cases/${c.id}`, { method: 'PATCH', body: JSON.stringify({ status }) });
+      onChanged?.();
+    } catch (e: any) {
+      setStatusMsg(e.message);
+    }
+  };
+
   const inputCls = 'border border-slate-300 rounded px-2 py-1.5 text-sm w-full focus:outline-none focus:border-amber-500';
 
   return (
+    <>
     <div className="grid grid-cols-3 gap-6">
       <div className="col-span-2 bg-white rounded shadow p-5">
         <div className="flex items-center justify-between mb-3">
@@ -274,7 +297,25 @@ function Overview({ data, onChanged, onGoBoard, onGoContacts }: any) {
         <p className="text-xs text-slate-400 mt-2">共 {stages.length} 个阶段 · 阶段与案情记录均可在看板中拖拽调整</p>
       </div>
       <div className="bg-white rounded shadow p-5">
-        <div className="flex items-center justify-between mb-3">
+        <h3 className="font-bold mb-3">案件状态</h3>
+        <div className="flex items-center gap-2">
+          <span className={`text-xs px-2 py-0.5 rounded-full ${statusBadgeCls(c.status)}`}>
+            {statusText(c.status)}
+          </span>
+          {canManageMembers ? (
+            <select value={c.status} onChange={(e) => changeStatus(e.target.value)}
+              className="border border-slate-300 rounded px-2 py-1 text-xs">
+              <option value="active">办理中</option>
+              <option value="closed">已结案</option>
+              <option value="archived">已归档</option>
+            </select>
+          ) : (
+            <span className="text-xs text-slate-400">仅主办/管理员可变更</span>
+          )}
+        </div>
+        {statusMsg && <p className="text-xs text-red-500 mt-2">{statusMsg}</p>}
+
+        <div className="flex items-center justify-between mb-3 mt-5">
           <h3 className="font-bold">案件成员</h3>
           {canManageMembers && !showAdd && (
             <button onClick={openAdd}
@@ -324,13 +365,24 @@ function Overview({ data, onChanged, onGoBoard, onGoContacts }: any) {
             <span className="text-slate-400 text-xs">{sideLabel(p.side)}</span> {p.name}
           </div>
         ))}
-        <button onClick={onGoContacts}
-          className="mt-2 text-xs text-amber-600 hover:underline">
-          前往联系人管理 →
-        </button>
+        {parties.length === 0 && <p className="text-xs text-slate-400">暂无联系人</p>}
+        <p className="text-xs text-slate-400 mt-2">完整管理见下方"联系人管理"</p>
       </div>
-    </div>
+      </div>
+      <div className="bg-white rounded shadow p-5 mt-6">
+        <h3 className="font-bold mb-4">联系人管理</h3>
+        <ContactsTab caseId={String(c.id)} parties={parties} onChanged={onChanged} />
+      </div>
+    </>
   );
+}
+function statusText(s: string) { return { active: '办理中', closed: '已结案', archived: '已归档' }[s] || s; }
+function statusBadgeCls(s: string) {
+  return {
+    active: 'bg-blue-100 text-blue-700',
+    closed: 'bg-emerald-100 text-emerald-700',
+    archived: 'bg-slate-200 text-slate-600',
+  }[s] || 'bg-slate-100 text-slate-600';
 }
 function Info({ label, value }: any) {
   return (

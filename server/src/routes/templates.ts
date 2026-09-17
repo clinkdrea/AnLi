@@ -5,6 +5,7 @@ import { exec } from 'node:child_process';
 import { db, TEMPLATES_DIR } from '../db/schema.js';
 import { scanTemplates, getTemplatesDir } from '../services/templates-scan.js';
 import { logAudit } from '../services/audit.js';
+import { guessMime } from '../services/mime.js';
 
 // 安全校验：请求路径必须位于模板目录内
 function resolveSafe(subPath?: string): string | null {
@@ -77,7 +78,29 @@ export default async function templateRoutes(app: FastifyInstance) {
     if (!full.startsWith(path.resolve(TEMPLATES_DIR) + path.sep) || !fs.existsSync(full)) {
       return reply.status(404).send({ error: '模板文件已丢失' });
     }
+    const inline = (req.query as any).inline === '1';
+    const baseName = path.basename(full);
+    reply.header('Content-Disposition',
+      `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(baseName)}`);
+    if (inline) reply.type(guessMime(baseName));
     return reply.send(fs.createReadStream(full));
+  });
+
+  // 用本地系统默认应用打开文件型模板（macOS: open 命令）
+  app.post('/api/templates/:id/open', async (req, reply) => {
+    const tid = Number((req.params as any).id);
+    const tpl = db.prepare('SELECT * FROM templates WHERE id = ?').get(tid) as any;
+    if (!tpl) return reply.status(404).send({ error: '模板不存在' });
+    if (!tpl.is_file || !tpl.file_path) return reply.status(400).send({ error: '该模板无本地文件' });
+    const full = path.resolve(TEMPLATES_DIR, tpl.file_path);
+    if (!full.startsWith(path.resolve(TEMPLATES_DIR) + path.sep) || !fs.existsSync(full)) {
+      return reply.status(404).send({ error: '模板文件已丢失' });
+    }
+    exec(`open ${JSON.stringify(full)}`, (err) => {
+      if (err) console.error('open template failed:', err);
+    });
+    logAudit(req.user!.id, 'template_open_local', 'template', tid, tpl.name);
+    return { ok: true, path: full };
   });
 
   // 创建文本模板（保留原功能）

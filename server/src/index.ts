@@ -28,7 +28,27 @@ import { startOCRWorker } from './services/ocr.js';
 import { scanTemplates } from './services/templates-scan.js';
 import { config } from './config.js';
 
-const app = Fastify({ logger: true, bodyLimit: 524288000 });
+// 高频心跳路径不打请求日志，避免控制台噪声（通知轮询、健康检查等）
+const SILENT_PATHS = new Set(['/api/notifications', '/api/health']);
+const app = Fastify({
+  // 关闭 Fastify 默认的 incoming request / request completed 日志
+  // 在 onResponse hook 里按需手动记录，心跳路径直接跳过
+  disableRequestLogging: true,
+  logger: {
+    level: process.env.LOG_LEVEL || 'info',
+  },
+  bodyLimit: 524288000,
+});
+
+// 自定义请求日志：仅非静默路径记录一行（包含 method + url + statusCode + 耗时）
+app.addHook('onResponse', async (req, reply) => {
+  if (SILENT_PATHS.has(req.url)) return; // 跳过心跳路径
+  const ms = reply.elapsedTime ? reply.elapsedTime.toFixed(2) : '?';
+  req.log.info(
+    { method: req.method, url: req.url, statusCode: reply.statusCode, responseTime: ms },
+    `${req.method} ${req.url} ${reply.statusCode} ${ms}ms`,
+  );
+});
 
 await app.register(cors, { origin: true, credentials: true });
 await app.register(cookie);

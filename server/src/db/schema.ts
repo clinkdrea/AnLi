@@ -76,6 +76,8 @@ export function initDb() {
     CREATE TABLE IF NOT EXISTS case_members (
       case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
       user_id INTEGER NOT NULL REFERENCES users(id),
+      pinned INTEGER NOT NULL DEFAULT 0,
+      last_opened_at TEXT,
       joined_at TEXT NOT NULL DEFAULT (datetime('now')),
       PRIMARY KEY (case_id, user_id)
     );
@@ -90,14 +92,15 @@ export function initDb() {
     );
     CREATE TABLE IF NOT EXISTS tasks (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+      case_id INTEGER REFERENCES cases(id) ON DELETE CASCADE,
       stage_id INTEGER REFERENCES case_stages(id),
       title TEXT NOT NULL,
       description TEXT,
       assignee_id INTEGER REFERENCES users(id),
       due_date TEXT,
       priority TEXT NOT NULL DEFAULT 'medium' CHECK(priority IN ('high','medium','low')),
-      status TEXT NOT NULL DEFAULT 'todo' CHECK(status IN ('todo','doing','done')),
+      status TEXT NOT NULL DEFAULT 'todo' CHECK(status IN ('todo','doing','done','expired')),
+      kind TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE TABLE IF NOT EXISTS deadlines (
@@ -155,9 +158,16 @@ export function initDb() {
       file_name TEXT NOT NULL,
       mime_type TEXT,
       size INTEGER NOT NULL,
+      category TEXT NOT NULL DEFAULT 'file',
       ocr_status TEXT NOT NULL DEFAULT 'pending' CHECK(ocr_status IN ('pending','processing','done','failed')),
       ocr_text TEXT,
       uploaded_by INTEGER NOT NULL REFERENCES users(id),
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS evidence_files (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      evidence_id INTEGER NOT NULL REFERENCES evidences(id) ON DELETE CASCADE,
+      file_id INTEGER NOT NULL REFERENCES file_records(id) ON DELETE CASCADE,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE TABLE IF NOT EXISTS conflict_reports (
@@ -295,6 +305,99 @@ export function initDb() {
       ALTER TABLE case_parties_new RENAME TO case_parties;
     `);
   }
+
+  // 老库迁移：case_members 补充置顶与近期打开字段
+  const memberCols = db.prepare('PRAGMA table_info(case_members)').all() as { name: string }[];
+  const memberColSet = new Set(memberCols.map((c) => c.name));
+  if (!memberColSet.has('pinned')) {
+    db.exec('ALTER TABLE case_members ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!memberColSet.has('last_opened_at')) {
+    db.exec('ALTER TABLE case_members ADD COLUMN last_opened_at TEXT');
+  }
+
+  // 老库迁移：tasks.case_id 改为可空（支持不关联案件的个人待办，需重建表）
+  const taskCols = db.prepare('PRAGMA table_info(tasks)').all() as { name: string; notnull: number }[];
+  const taskCaseCol = taskCols.find((c) => c.name === 'case_id');
+  if (taskCaseCol && taskCaseCol.notnull === 1) {
+    db.exec(`
+      CREATE TABLE tasks_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        case_id INTEGER REFERENCES cases(id) ON DELETE CASCADE,
+        stage_id INTEGER REFERENCES case_stages(id),
+        title TEXT NOT NULL,
+        description TEXT,
+        assignee_id INTEGER REFERENCES users(id),
+        due_date TEXT,
+        priority TEXT NOT NULL DEFAULT 'medium' CHECK(priority IN ('high','medium','low')),
+        status TEXT NOT NULL DEFAULT 'todo' CHECK(status IN ('todo','doing','done','expired')),
+        kind TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO tasks_new (id, case_id, stage_id, title, description, assignee_id, due_date, priority, status, created_at)
+      SELECT id, case_id, stage_id, title, description, assignee_id, due_date, priority, status, created_at FROM tasks;
+      DROP TABLE tasks;
+      ALTER TABLE tasks_new RENAME TO tasks;
+    `);
+  }
+
+  // 老库迁移：tasks 补充 kind 列（标记系统自动生成的待办，如 'hearing' 开庭）
+  const taskCols2 = db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[];
+  if (!taskCols2.some((c) => c.name === 'kind')) {
+    db.exec('ALTER TABLE tasks ADD COLUMN kind TEXT');
+  }
+
+  // 老库迁移：tasks.status 增加 'expired' 状态（CHECK 约束变化需重建表）
+  const tasksSqlRow = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'").get() as { sql: string } | undefined;
+  if (tasksSqlRow?.sql && !tasksSqlRow.sql.includes("'expired'")) {
+    db.exec(`
+      CREATE TABLE tasks_new2 (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        case_id INTEGER REFERENCES cases(id) ON DELETE CASCADE,
+        stage_id INTEGER REFERENCES case_stages(id),
+        title TEXT NOT NULL,
+        description TEXT,
+        assignee_id INTEGER REFERENCES users(id),
+        due_date TEXT,
+        priority TEXT NOT NULL DEFAULT 'medium' CHECK(priority IN ('high','medium','low')),
+        status TEXT NOT NULL DEFAULT 'todo' CHECK(status IN ('todo','doing','done','expired')),
+        kind TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO tasks_new2 (id, case_id, stage_id, title, description, assignee_id, due_date, priority, status, kind, created_at)
+      SELECT id, case_id, stage_id, title, description, assignee_id, due_date, priority, status, kind, created_at FROM tasks;
+      DROP TABLE tasks;
+      ALTER TABLE tasks_new2 RENAME TO tasks;
+    `);
+  }
+
+  // 回填：已有案件的开庭时间自动生成开庭待办（负责人=主办律师，不重复生成）
+  db.exec(`
+    INSERT INTO tasks (case_id, title, assignee_id, due_date, priority, status, kind, created_at)
+    SELECT c.id, '开庭', c.lead_id, c.hearing_date, 'high', 'todo', 'hearing', datetime('now')
+    FROM cases c
+    WHERE c.hearing_date IS NOT NULL AND c.hearing_date != ''
+      AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.case_id = c.id AND t.kind = 'hearing')
+  `);
+
+  // 老库迁移：file_records 补充 category 列（区分普通资料与证据文件）
+  const fileCols = db.prepare('PRAGMA table_info(file_records)').all() as { name: string }[];
+  if (!fileCols.some((c) => c.name === 'category')) {
+    db.exec("ALTER TABLE file_records ADD COLUMN category TEXT NOT NULL DEFAULT 'file'");
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS evidence_files (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      evidence_id INTEGER NOT NULL REFERENCES evidences(id) ON DELETE CASCADE,
+      file_id INTEGER NOT NULL REFERENCES file_records(id) ON DELETE CASCADE,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+  // 历史数据：已通过 evidences.file_id 关联的单文件迁移到 evidence_files
+  db.exec(`
+    INSERT OR IGNORE INTO evidence_files (evidence_id, file_id)
+    SELECT id, file_id FROM evidences WHERE file_id IS NOT NULL
+  `);
 }
 
 export { db, DATA_DIR, CASES_DIR, TEMPLATES_DIR };

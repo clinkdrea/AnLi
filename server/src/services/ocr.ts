@@ -35,10 +35,11 @@ function runOCR(imagePath: string): Promise<string> {
   });
 }
 
-// 处理单个文件的 OCR
-async function processFile(fileId: number) {
+// 处理单个文件的 OCR，返回最终状态：done / failed / skipped（非图片）/ missing
+async function processFile(fileId: number): Promise<'done' | 'failed' | 'skipped' | 'missing'> {
   const file = db.prepare('SELECT * FROM file_records WHERE id = ?').get(fileId) as any;
-  if (!file || !isImage(file.file_name)) return;
+  if (!file) return 'missing';
+  if (!isImage(file.file_name)) return 'skipped';
 
   db.prepare("UPDATE file_records SET ocr_status = 'processing' WHERE id = ?").run(fileId);
 
@@ -47,35 +48,42 @@ async function processFile(fileId: number) {
 
   if (!fs.existsSync(fullPath)) {
     db.prepare("UPDATE file_records SET ocr_status = 'failed' WHERE id = ?").run(fileId);
-    return;
+    return 'failed';
   }
 
   try {
     const text = await runOCR(fullPath);
     db.prepare('UPDATE file_records SET ocr_status = ?, ocr_text = ? WHERE id = ?')
       .run('done', text || '(未识别到文字)', fileId);
+    return 'done';
   } catch (e) {
     db.prepare("UPDATE file_records SET ocr_status = 'failed' WHERE id = ?").run(fileId);
+    return 'failed';
   }
 }
 
-// 扫描所有 pending 状态的图片文件并处理
+// 扫描所有 pending 状态的图片文件并处理（非图片文件留在 pending，由前端按扩展名展示）
 export async function runOCRQueue() {
   const pending = db.prepare(
-    "SELECT id FROM file_records WHERE ocr_status = 'pending'"
-  ).all() as { id: number }[];
+    "SELECT id, file_name FROM file_records WHERE ocr_status = 'pending'"
+  ).all() as { id: number; file_name: string }[];
   for (const f of pending) {
-    await processFile(f.id);
+    if (isImage(f.file_name)) await processFile(f.id);
   }
 }
 
 // 对单个文件触发 OCR
-export async function triggerOCR(fileId: number) {
-  const file = db.prepare('SELECT ocr_status FROM file_records WHERE id = ?').get(fileId) as any;
-  if (!file) return;
-  if (file.ocr_status === 'pending' || file.ocr_status === 'failed') {
-    await processFile(fileId);
+// force=true 时忽略已有结果（done 也可重新识别）；返回最终状态
+export async function triggerOCR(fileId: number, force = false): Promise<'done' | 'failed' | 'skipped' | 'missing'> {
+  const file = db.prepare('SELECT ocr_status, file_name FROM file_records WHERE id = ?').get(fileId) as any;
+  if (!file) return 'missing';
+  if (!isImage(file.file_name)) return 'skipped';
+  if (force) {
+    db.prepare("UPDATE file_records SET ocr_status = 'pending', ocr_text = NULL WHERE id = ?").run(fileId);
+  } else if (file.ocr_status === 'processing' || file.ocr_status === 'done') {
+    return file.ocr_status as any;
   }
+  return processFile(fileId);
 }
 
 // 启动定时 OCR 队列（每 30 秒扫描一次）

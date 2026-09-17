@@ -55,6 +55,9 @@ export default async function caseRoutes(app: FastifyInstance) {
     }
     const caseRow = db.prepare('SELECT * FROM cases WHERE id = ?').get(cid) as any;
     if (!caseRow) return reply.status(404).send({ error: '案件不存在' });
+    // 记录近期打开（仅案件成员；用于看板"近期打开"展示）
+    db.prepare("UPDATE case_members SET last_opened_at = datetime('now') WHERE case_id = ? AND user_id = ?")
+      .run(cid, req.user!.id);
     const parties = db.prepare('SELECT * FROM case_parties WHERE case_id = ? ORDER BY side, id').all(cid);
     const related = db.prepare('SELECT * FROM related_parties WHERE case_id = ?').all(cid);
     const legal = db.prepare('SELECT * FROM case_legal_info WHERE case_id = ?').get(cid);
@@ -72,9 +75,21 @@ export default async function caseRoutes(app: FastifyInstance) {
       return reply.status(403).send({ error: '仅管理员与主办律师可创建案件' });
     }
     const body = req.body as any;
-    const { name, type, court, hearing_date, hearing_at, summary, cause, court_case_no, amount, entrust_start, contacts } = body;
-    const hearingDate = hearing_date || hearing_at || null;
+    // 兼容两种提交结构：顶层字段 或 legal 嵌套对象（NewCaseModal）
+    const legalBody = body.legal || {};
+    const pick = (k: string) => (body[k] !== undefined ? body[k] : legalBody[k]);
+    const name = pick('name');
+    const type = pick('type');
+    const court = pick('court');
+    const hearingDate = pick('hearing_date') || pick('hearing_at') || null;
+    const summary = pick('summary');
+    const cause = pick('cause');
+    const court_case_no = pick('court_case_no');
+    const amount = pick('amount');
+    const entrust_start = pick('entrust_start');
+    const { contacts } = body;
     if (!name?.trim() || !type) return reply.status(400).send({ error: '案件名称与类型为必填' });
+    if (!hearingDate) return reply.status(400).send({ error: '开庭时间为必填' });
     const list: ContactInput[] = Array.isArray(contacts) ? contacts : [];
     const hasOur = list.some((c) => c.category === 'our' && c.name?.trim());
     const hasOpp = list.some((c) => c.category === 'opponent' && c.name?.trim());
@@ -117,6 +132,13 @@ export default async function caseRoutes(app: FastifyInstance) {
       stageList.forEach((s: string, i: number) => insStage.run(cid, s, i));
 
       db.prepare('INSERT INTO case_members (case_id, user_id) VALUES (?, ?)').run(cid, req.user!.id);
+
+      // 开庭时间自动记入待办（负责人=主办律师，高优先级）
+      db.prepare(
+        `INSERT INTO tasks (case_id, title, assignee_id, due_date, priority, kind)
+         VALUES (?, '开庭', ?, ?, 'high', 'hearing')`
+      ).run(cid, req.user!.id, hearingDate);
+
       logAudit(req.user!.id, 'case_create', 'case', cid, `${caseNo} ${name}`);
       db.exec('COMMIT');
       return reply.status(201).send({ id: cid, case_no: caseNo });
@@ -143,6 +165,24 @@ export default async function caseRoutes(app: FastifyInstance) {
     if (fields.length) {
       db.prepare(`UPDATE cases SET ${fields.join(', ')} WHERE id = ?`).run(...params, cid);
     }
+    // 开庭时间变更时同步自动生成的开庭待办
+    if (b.hearing_date !== undefined) {
+      const hd = b.hearing_date || null;
+      const hearingTask = db.prepare(
+        "SELECT id FROM tasks WHERE case_id = ? AND kind = 'hearing' AND status != 'done'"
+      ).get(cid) as { id: number } | undefined;
+      if (hd) {
+        if (hearingTask) {
+          db.prepare('UPDATE tasks SET due_date = ? WHERE id = ?').run(hd, hearingTask.id);
+        } else {
+          db.prepare(
+            "INSERT INTO tasks (case_id, title, assignee_id, due_date, priority, kind) VALUES (?, '开庭', ?, ?, 'high', 'hearing')"
+          ).run(cid, caseRow.lead_id, hd);
+        }
+      } else if (hearingTask) {
+        db.prepare('DELETE FROM tasks WHERE id = ?').run(hearingTask.id);
+      }
+    }
     // 法律信息：案由/案号
     const legalFields: string[] = [];
     const legalParams: any[] = [];
@@ -151,6 +191,24 @@ export default async function caseRoutes(app: FastifyInstance) {
     }
     if (legalFields.length) {
       db.prepare(`UPDATE case_legal_info SET ${legalFields.join(', ')} WHERE case_id = ?`).run(...legalParams, cid);
+    }
+    // 案件状态变更：仅主办律师或管理员
+    if (b.status !== undefined && b.status !== caseRow.status) {
+      if (!['active', 'closed', 'archived'].includes(b.status)) {
+        return reply.status(400).send({ error: '非法状态值' });
+      }
+      if (req.user!.role !== 'admin' && caseRow.lead_id !== req.user!.id) {
+        return reply.status(403).send({ error: '仅主办律师或管理员可变更案件状态' });
+      }
+      if (b.status === 'closed') {
+        db.prepare("UPDATE cases SET status='closed', closed_at=COALESCE(closed_at, datetime('now')) WHERE id=?").run(cid);
+      } else if (caseRow.status === 'closed') {
+        // 从结案状态改回办理中/归档：清除结案时间
+        db.prepare('UPDATE cases SET status=?, closed_at=NULL WHERE id=?').run(b.status, cid);
+      } else {
+        db.prepare('UPDATE cases SET status=? WHERE id=?').run(b.status, cid);
+      }
+      logAudit(req.user!.id, 'case_status_change', 'case', cid, `${caseRow.status} -> ${b.status}`);
     }
     logAudit(req.user!.id, 'case_update', 'case', cid);
     return { ok: true };
@@ -251,6 +309,18 @@ export default async function caseRoutes(app: FastifyInstance) {
     if (uid === caseRow.lead_id) return reply.status(400).send({ error: '不能移除主办律师' });
     db.prepare('DELETE FROM case_members WHERE case_id = ? AND user_id = ?').run(cid, uid);
     logAudit(req.user!.id, 'case_remove_member', 'case', cid, `user=${uid}`);
+    return { ok: true };
+  });
+
+  // 置顶/取消置顶（按成员维度，各成员独立）
+  app.post('/api/cases/:id/pin', async (req, reply) => {
+    const cid = Number((req.params as any).id);
+    if (req.user!.role !== 'admin' && !isCaseMember(req.user!.id, cid)) {
+      return reply.status(403).send({ error: '无权访问该案件' });
+    }
+    const { pinned } = req.body as { pinned?: boolean };
+    db.prepare('UPDATE case_members SET pinned = ? WHERE case_id = ? AND user_id = ?')
+      .run(pinned ? 1 : 0, cid, req.user!.id);
     return { ok: true };
   });
 

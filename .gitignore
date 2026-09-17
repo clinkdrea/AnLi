@@ -30,3 +30,6 @@ server/scripts/ocr
 # 系统与日志
 *.log
 .DS_Store
+
+# 性能分析临时文件
+*.profraw

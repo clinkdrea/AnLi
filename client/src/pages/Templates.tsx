@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { FolderOpen, RefreshCw, Download, Search, ChevronDown, ChevronRight, FileText, Plus } from 'lucide-react';
+import { FolderOpen, RefreshCw, Download, Search, ChevronDown, ChevronRight, FileText, Plus, Eye, X } from 'lucide-react';
 
 export default function TemplatesPage() {
   const [templates, setTemplates] = useState<any[]>([]);
@@ -12,6 +12,8 @@ export default function TemplatesPage() {
   const [scanMsg, setScanMsg] = useState('');
   const [showTextForm, setShowTextForm] = useState(false);
   const [textForm, setTextForm] = useState({ name: '', category: '', content: '' });
+  const [preview, setPreview] = useState<any>(null);
+  const [tip, setTip] = useState('');
 
   const load = (sel = selected, keyword = q) => {
     let url = '/api/templates';
@@ -45,6 +47,20 @@ export default function TemplatesPage() {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
       body: JSON.stringify({ path: sub || '' }),
     });
+  };
+
+  // 用本地系统默认应用打开文件型模板（macOS: open 命令）
+  const openLocal = async (t: any) => {
+    setTip('');
+    try {
+      const r = await fetch(`/api/templates/${t.id}/open`, { method: 'POST', credentials: 'include' });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || '打开失败');
+      setTip(`已使用本地应用打开「${t.name}」`);
+      setTimeout(() => setTip(''), 3000);
+    } catch (e: any) {
+      setTip(e.message || '打开失败');
+    }
   };
 
   const createText = async () => {
@@ -165,16 +181,29 @@ export default function TemplatesPage() {
               <div key={t.id} className="flex items-center gap-3 px-4 py-2.5 border-b last:border-0 hover:bg-slate-50">
                 <FileText className="w-4 h-4 text-blue-500 shrink-0" />
                 <div className="flex-1 min-w-0">
-                  <div className="text-sm truncate">{t.name}</div>
+                  <button onClick={() => t.is_file ? openLocal(t) : setPreview(t)}
+                    className="text-sm truncate block text-left hover:text-amber-600 hover:underline max-w-full"
+                    title={t.is_file ? `用本地应用打开 ${t.name}` : `查看 ${t.name}`}>
+                    {t.name}
+                  </button>
                   <div className="text-xs text-slate-400">{t.category_path || t.category || '文本模板'}</div>
                 </div>
                 {t.is_file ? (
-                  <a href={`/api/templates/${t.id}/download`}
-                    className="flex items-center gap-1 text-xs text-blue-600 hover:underline shrink-0">
-                    <Download className="w-3.5 h-3.5" /> 下载
-                  </a>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <button onClick={() => openLocal(t)}
+                      className="flex items-center gap-1 text-xs text-slate-500 hover:text-amber-600">
+                      <Eye className="w-3.5 h-3.5" /> 打开
+                    </button>
+                    <a href={`/api/templates/${t.id}/download`}
+                      className="flex items-center gap-1 text-xs text-blue-600 hover:underline">
+                      <Download className="w-3.5 h-3.5" /> 下载
+                    </a>
+                  </div>
                 ) : (
-                  <span className="text-xs text-slate-400 shrink-0">文本模板</span>
+                  <button onClick={() => setPreview(t)}
+                    className="flex items-center gap-1 text-xs text-slate-500 hover:text-amber-600 shrink-0">
+                    <Eye className="w-3.5 h-3.5" /> 查看
+                  </button>
                 )}
               </div>
             ))}
@@ -182,6 +211,25 @@ export default function TemplatesPage() {
           </div>
         </div>
       </div>
+
+      {tip && <div className="text-sm text-amber-600 mb-3">{tip}</div>}
+
+      {preview && !preview.is_file && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-6" onClick={() => setPreview(null)}>
+          <div className="bg-white rounded-lg w-full max-w-3xl max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center gap-2 px-5 py-3 border-b">
+              <FileText className="w-4 h-4 text-slate-400" />
+              <span className="font-bold flex-1 truncate">{preview.name}</span>
+              <button onClick={() => setPreview(null)} className="text-slate-400 hover:text-slate-700">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <pre className="flex-1 overflow-auto p-5 text-sm whitespace-pre-wrap font-mono text-slate-700">
+              {preview.content || '（空模板）'}
+            </pre>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

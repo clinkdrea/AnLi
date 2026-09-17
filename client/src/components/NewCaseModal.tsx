@@ -1,12 +1,8 @@
 import { useState } from 'react';
 import { Plus, Trash2 } from 'lucide-react';
 import { api } from '../api';
+import { CASE_TYPES } from '../constants';
 
-const TYPES = [
-  { v: 'civil', l: '民事' }, { v: 'criminal', l: '刑事' }, { v: 'administrative', l: '行政' },
-  { v: 'arbitration', l: '仲裁' }, { v: 'enforcement', l: '执行' },
-  { v: 'nonlitigation', l: '非诉专项' }, { v: 'legal_advisor', l: '常年法律顾问' }, { v: 'other', l: '其他' },
-];
 const CATEGORIES = [
   { v: 'our', l: '我方当事人' },
   { v: 'opponent', l: '对方当事人' },
@@ -50,6 +46,7 @@ export default function NewCaseModal({ onClose }: any) {
   const validate = () => {
     const e: any = {};
     if (!name.trim()) e.name = '请输入案件名称';
+    if (!hearingAt) e.hearing = '请选择开庭时间（开庭将自动记入待办）';
     if (!contacts.some((c) => c.category === 'our' && c.name.trim())) e.our = '请填写我方当事人姓名/名称';
     if (!contacts.some((c) => c.category === 'opponent' && c.name.trim())) e.opponent = '请填写对方当事人姓名/名称';
     const cerr: any = {};
@@ -92,7 +89,7 @@ export default function NewCaseModal({ onClose }: any) {
             </Field>
             <Field label="案件类型" required>
               <select value={type} onChange={(e) => setType(e.target.value)} className={`w-full ${INPUT}`}>
-                {TYPES.map((t) => <option key={t.v} value={t.v}>{t.l}</option>)}
+                {CASE_TYPES.map((t) => <option key={t.v} value={t.v}>{t.l}</option>)}
               </select>
             </Field>
             <Field label="案号">
@@ -103,8 +100,10 @@ export default function NewCaseModal({ onClose }: any) {
               <input value={court} onChange={(e) => setCourt(e.target.value)}
                 placeholder="如：北京市第一中级人民法院" className={`w-full ${INPUT}`} />
             </Field>
-            <Field label="开庭时间">
-              <input type="datetime-local" value={hearingAt} onChange={(e) => setHearingAt(e.target.value)} className={`w-full ${INPUT}`} />
+            <Field label="开庭时间" required error={errors.hearing}>
+              <input type="datetime-local" value={hearingAt}
+                onChange={(e) => { setHearingAt(e.target.value); clearErr('hearing'); }}
+                className={`w-full ${inputCls(errors.hearing)}`} />
             </Field>
             <Field label="案由">
               <input value={cause} onChange={(e) => setCause(e.target.value)}

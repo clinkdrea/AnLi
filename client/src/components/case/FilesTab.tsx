@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Upload, Download, Trash2, FileText, Image, FileArchive, Copy, FolderInput, X, Search, ChevronRight } from 'lucide-react';
+import { Upload, Download, Trash2, FileText, Image, FileArchive, Copy, FolderInput, X, Search, ChevronRight, Eye, Pencil } from 'lucide-react';
 import { api } from '../../api';
+import OcrActions, { isImageFile } from './OcrActions';
+import { RenameFileModal } from './RenameFile';
 
 function FileIcon({ name }: { name: string }) {
   const ext = name.split('.').pop()?.toLowerCase() || '';
@@ -21,12 +23,22 @@ export default function FilesTab({ caseId, onChanged }: { caseId: string; onChan
   const inputRef = useRef<HTMLInputElement>(null);
   const [showTplModal, setShowTplModal] = useState(false);
   const [showCaseModal, setShowCaseModal] = useState(false);
+  const [tip, setTip] = useState('');
+  const [renaming, setRenaming] = useState<any>(null);
 
   const load = () => {
     fetch(`/api/cases/${caseId}/files`, { credentials: 'include' })
       .then((r) => r.json()).then((d) => setFiles(d.files || []));
   };
   useEffect(() => { load(); }, [caseId]);
+
+  // 有图片正在识别时（如后台 worker 自动识别），每 3 秒轮询刷新
+  const hasProcessing = files.some((f) => isImageFile(f.file_name) && f.ocr_status === 'processing');
+  useEffect(() => {
+    if (!hasProcessing) return;
+    const t = setInterval(load, 3000);
+    return () => clearInterval(t);
+  }, [hasProcessing]);
 
   const reloadAll = () => { load(); onChanged?.(); };
 
@@ -51,22 +63,24 @@ export default function FilesTab({ caseId, onChanged }: { caseId: string; onChan
     reloadAll();
   };
 
-  const ocrStatusLabel = (s: string) => ({
-    pending: '待识别', processing: '识别中', done: '已识别', failed: '失败',
-  }[s] || s);
-  const ocrColor = (s: string) => ({
-    pending: 'text-slate-400', processing: 'text-amber-500', done: 'text-green-600', failed: 'text-red-500',
-  }[s] || '');
-
-  const doOCR = async (id: number) => {
-    await fetch(`/api/files/${id}/ocr`, { method: 'POST', credentials: 'include' });
-    setTimeout(load, 2000);
+  // 用本地系统默认应用打开文件（macOS: open 命令）
+  const openLocal = async (id: number, name: string) => {
+    setTip('');
+    try {
+      const r = await fetch(`/api/files/${id}/open`, { method: 'POST', credentials: 'include' });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || '打开失败');
+      setTip(`已使用本地应用打开「${name}」`);
+      setTimeout(() => setTip(''), 3000);
+    } catch (e: any) {
+      setTip(e.message || '打开失败');
+    }
   };
 
   return (
     <div>
       <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
-        <p className="text-sm text-slate-500">文件存放在案件文件夹中，支持 PDF / Word / Excel / 图片等</p>
+        <p className="text-sm text-slate-500">文件存放在案件文件夹中，支持 PDF / Word / Excel / 图片等；图片可 OCR 识别并在弹窗查看、复制文本</p>
         <div className="flex gap-2">
           <button onClick={() => setShowTplModal(true)}
             className="flex items-center gap-1 border px-3 py-2 rounded text-sm hover:bg-slate-50">
@@ -84,6 +98,7 @@ export default function FilesTab({ caseId, onChanged }: { caseId: string; onChan
         </div>
       </div>
       {loading && <div className="text-sm text-amber-600 mb-2">上传中...</div>}
+      {tip && <div className="text-sm text-amber-600 mb-2">{tip}</div>}
 
       <div className="bg-white rounded shadow overflow-hidden">
         <table className="w-full text-sm">
@@ -92,7 +107,7 @@ export default function FilesTab({ caseId, onChanged }: { caseId: string; onChan
               <th className="text-left px-4 py-3">文件名</th>
               <th className="text-left px-4 py-3">大小</th>
               <th className="text-left px-4 py-3">上传人</th>
-              <th className="text-left px-4 py-3">OCR</th>
+              <th className="text-left px-4 py-3">OCR 识别</th>
               <th className="text-left px-4 py-3">操作</th>
             </tr>
           </thead>
@@ -102,22 +117,31 @@ export default function FilesTab({ caseId, onChanged }: { caseId: string; onChan
                 <td className="px-4 py-3">
                   <div className="flex items-center gap-2">
                     <FileIcon name={f.file_name} />
-                    <span>{f.file_name}</span>
+                    <button onClick={() => openLocal(f.id, f.file_name)}
+                      className="text-slate-700 hover:text-amber-600 hover:underline truncate max-w-[320px]"
+                      title={`用本地应用打开 ${f.file_name}`}>
+                      {f.file_name}
+                    </button>
                   </div>
                 </td>
                 <td className="px-4 py-3 text-slate-500">{formatSize(f.size)}</td>
                 <td className="px-4 py-3 text-slate-500">{f.uploader_name}</td>
                 <td className="px-4 py-3">
-                  <span className={`text-xs ${ocrColor(f.ocr_status)}`}>{ocrStatusLabel(f.ocr_status)}</span>
-                  {['pending', 'failed'].includes(f.ocr_status) && (
-                    <button onClick={() => doOCR(f.id)} className="ml-2 text-xs text-blue-600 hover:underline">识别</button>
-                  )}
+                  <OcrActions file={f} size="cell" onChanged={load} />
                 </td>
                 <td className="px-4 py-3">
                   <div className="flex gap-2">
+                    <button onClick={() => openLocal(f.id, f.file_name)}
+                      className="text-slate-500 hover:text-amber-600 flex items-center gap-1">
+                      <Eye className="w-3.5 h-3.5" /> 打开
+                    </button>
                     <a href={`/api/files/${f.id}/download`} className="text-blue-600 hover:underline flex items-center gap-1">
                       <Download className="w-3 h-3" /> 下载
                     </a>
+                    <button onClick={() => setRenaming(f)}
+                      className="text-slate-500 hover:text-amber-600 flex items-center gap-1">
+                      <Pencil className="w-3.5 h-3.5" /> 重命名
+                    </button>
                     <button onClick={() => del(f.id, f.file_name)} className="text-red-500 hover:underline flex items-center gap-1">
                       <Trash2 className="w-3 h-3" /> 删除
                     </button>
@@ -135,6 +159,11 @@ export default function FilesTab({ caseId, onChanged }: { caseId: string; onChan
       )}
       {showCaseModal && (
         <CopyFromCaseModal caseId={caseId} onClose={() => setShowCaseModal(false)} onCopied={reloadAll} />
+      )}
+      {renaming && (
+        <RenameFileModal file={renaming}
+          onClose={() => setRenaming(null)}
+          onRenamed={() => { setRenaming(null); reloadAll(); }} />
       )}
     </div>
   );
