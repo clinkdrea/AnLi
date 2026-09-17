@@ -4,19 +4,30 @@ import { db } from '../db/schema.js';
 export default async function auditRoutes(app: FastifyInstance) {
   app.get('/api/audit/logs', async (req, reply) => {
     if (req.user!.role !== 'admin') return reply.status(403).send({ error: '仅管理员' });
-    const { action, user_id, object_type, from, to, limit } = req.query as any;
-    let sql = `SELECT al.*, u.name as user_name FROM audit_logs al
-               LEFT JOIN users u ON al.user_id = u.id WHERE 1=1`;
+    const { action, user_id, object_type, from, to } = req.query as any;
+    const page = Math.max(1, Number((req.query as any).page) || 1);
+    const pageSize = Math.min(100, Math.max(1, Number((req.query as any).pageSize) || 20));
+    const offset = (page - 1) * pageSize;
+
+    const where: string[] = [];
     const params: any[] = [];
-    if (action) { sql += ' AND al.action = ?'; params.push(action); }
-    if (user_id) { sql += ' AND al.user_id = ?'; params.push(user_id); }
-    if (object_type) { sql += ' AND al.object_type = ?'; params.push(object_type); }
-    if (from) { sql += ' AND al.created_at >= ?'; params.push(from); }
-    if (to) { sql += ' AND al.created_at <= ?'; params.push(to); }
-    sql += ' ORDER BY al.created_at DESC LIMIT ?';
-    params.push(Number(limit) || 200);
-    const logs = db.prepare(sql).all(...params);
-    return { logs };
+    if (action) { where.push('al.action = ?'); params.push(action); }
+    if (user_id) { where.push('al.user_id = ?'); params.push(user_id); }
+    if (object_type) { where.push('al.object_type = ?'); params.push(object_type); }
+    if (from) { where.push('al.created_at >= ?'); params.push(from); }
+    if (to) { where.push('al.created_at <= ?'); params.push(to); }
+    const whereSql = where.length ? ` WHERE ${where.join(' AND ')}` : '';
+
+    const total = (db.prepare(
+      `SELECT COUNT(*) as c FROM audit_logs al${whereSql}`
+    ).get(...params) as { c: number }).c;
+
+    const logs = db.prepare(
+      `SELECT al.*, u.name as user_name FROM audit_logs al
+       LEFT JOIN users u ON al.user_id = u.id${whereSql}
+       ORDER BY al.created_at DESC LIMIT ? OFFSET ?`
+    ).all(...params, pageSize, offset);
+    return { logs, total, page, pageSize };
   });
 
   // 操作统计报表

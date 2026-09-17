@@ -1,17 +1,28 @@
 import { useEffect, useState } from 'react';
 import { Shield } from 'lucide-react';
+import Pagination from '../components/Pagination';
+
+const PAGE_SIZE = 20;
 
 export default function AuditPage() {
   const [logs, setLogs] = useState<any[]>([]);
   const [stats, setStats] = useState<any>(null);
   const [action, setAction] = useState('');
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
 
-  const load = () => {
-    fetch(`/api/audit/logs${action ? `?action=${action}` : ''}`, { credentials: 'include' })
-      .then((r) => r.json()).then((d) => setLogs(d.logs || []));
+  const load = (p = page) => {
+    const params = new URLSearchParams();
+    if (action) params.set('action', action);
+    params.set('page', String(p));
+    params.set('pageSize', String(PAGE_SIZE));
+    fetch(`/api/audit/logs?${params.toString()}`, { credentials: 'include' })
+      .then((r) => r.json()).then((d) => { setLogs(d.logs || []); setTotal(d.total || 0); });
     fetch('/api/audit/stats', { credentials: 'include' }).then((r) => r.json()).then(setStats);
   };
-  useEffect(() => { load(); }, [action]);
+  // 操作筛选变化时回到第一页
+  useEffect(() => { setPage(1); load(1); }, [action]);
+  const goPage = (p: number) => { setPage(p); load(p); };
 
   const actionLabels: Record<string, string> = {
     login: '登录', logout: '登出', case_create: '创建案件', case_close: '结案',
@@ -86,6 +97,7 @@ export default function AuditPage() {
           </tbody>
         </table>
         {logs.length === 0 && <div className="p-8 text-center text-slate-400">暂无日志</div>}
+        <Pagination page={page} pageSize={PAGE_SIZE} total={total} onChange={goPage} />
       </div>
     </div>
   );

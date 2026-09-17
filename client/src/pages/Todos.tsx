@@ -2,6 +2,9 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ArrowLeft, FileDown, Search, Check, Clock, X, Filter } from 'lucide-react';
 import { api } from '../api';
+import Pagination from '../components/Pagination';
+
+const PAGE_SIZE = 20;
 
 const STATUS_OPTS = [
   { v: 'all', l: '全部状态' },
@@ -35,14 +38,16 @@ export default function Todos() {
   const [q, setQ] = useState('');
   const [sortBy, setSortBy] = useState<'due' | 'created'>('due');
   const [order, setOrder] = useState<'asc' | 'desc'>('asc');
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [tip, setTip] = useState('');
 
   useEffect(() => {
-    api('/cases').then((d) => setCases(d.cases || [])).catch(() => {});
+    api('/cases/select').then((d) => setCases(d.cases || [])).catch(() => {});
   }, []);
 
-  const load = () => {
+  const load = (p = page) => {
     const params = new URLSearchParams();
     if (status !== 'all') params.set('status', status);
     if (caseId) params.set('case_id', caseId);
@@ -51,10 +56,17 @@ export default function Todos() {
     if (q.trim()) params.set('q', q.trim());
     params.set('sort', sortBy);
     params.set('order', order);
-    fetch(`/api/todos?${params.toString()}`, { credentials: 'include' })
-      .then((r) => r.json()).then((d) => setTasks(d.tasks || []));
+    params.set('page', String(p));
+    params.set('pageSize', String(PAGE_SIZE));
+    api(`/todos?${params.toString()}`).then((d) => {
+      setTasks(d.tasks || []);
+      setTotal(d.total || 0);
+    });
   };
-  useEffect(() => { load(); }, [status, caseId, from, to, sortBy, order]);
+  // 筛选条件变化时回到第一页
+  useEffect(() => { setPage(1); load(1); }, [status, caseId, from, to, q, sortBy, order]);
+  // 翻页
+  const goPage = (p: number) => { setPage(p); load(p); };
 
   // 搜索框回车或按钮触发查询
   const search = (e?: any) => { e?.preventDefault?.(); load(); };
@@ -171,7 +183,7 @@ export default function Todos() {
       {tip && <div className="mb-3 text-sm text-green-600 bg-green-50 border border-green-200 rounded px-3 py-2">{tip}</div>}
 
       {/* 列表 */}
-      <div className="bg-white rounded shadow">
+      <div className="bg-white rounded shadow overflow-hidden">
         {tasks.length === 0 && <div className="p-10 text-center text-slate-400 text-sm">没有符合条件的任务</div>}
         {tasks.map((t) => {
           const isSel = selected.has(t.id);
@@ -220,6 +232,7 @@ export default function Todos() {
             </div>
           );
         })}
+        <Pagination page={page} pageSize={PAGE_SIZE} total={total} onChange={goPage} />
       </div>
       <p className="text-xs text-slate-400 mt-3">
         过期任务会自动从概览看板的"我的待办"中移除，但可在此页面查看与导出。点击左侧圆点可重新激活已完成的任务。

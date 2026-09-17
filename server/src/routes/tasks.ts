@@ -82,6 +82,7 @@ export default async function taskRoutes(app: FastifyInstance) {
   //   q=关键词（标题模糊）
   //   sort=due|created（默认 due）
   //   order=asc|desc（默认 asc for due, desc for created）
+  //   page（1-based，默认 1）、pageSize（默认 20，最大 100）
   app.get('/api/todos', async (req) => {
     const uid = req.user!.id;
     // 懒执行：先自动关闭过期任务
@@ -123,13 +124,23 @@ export default async function taskRoutes(app: FastifyInstance) {
     const order = q.order === 'asc' ? 'ASC' : q.order === 'desc' ? 'DESC' : defaultOrder;
     const orderExpr = sort === 'due_date' ? '(t.due_date IS NULL), t.due_date' : 't.created_at';
 
+    const page = Math.max(1, Number(q.page) || 1);
+    const pageSize = Math.min(100, Math.max(1, Number(q.pageSize) || 20));
+    const offset = (page - 1) * pageSize;
+    const whereSql = where.join(' AND ');
+
+    const total = (db.prepare(
+      `SELECT COUNT(*) as c FROM tasks t LEFT JOIN cases c ON t.case_id = c.id WHERE ${whereSql}`
+    ).get(...params) as { c: number }).c;
+
     const tasks = db.prepare(
       `SELECT t.*, c.name as case_name, c.case_no as case_no
        FROM tasks t LEFT JOIN cases c ON t.case_id = c.id
-       WHERE ${where.join(' AND ')}
-       ORDER BY ${orderExpr} ${order}`
-    ).all(...params);
-    return { tasks };
+       WHERE ${whereSql}
+       ORDER BY ${orderExpr} ${order}
+       LIMIT ? OFFSET ?`
+    ).all(...params, pageSize, offset);
+    return { tasks, total, page, pageSize };
   });
 
   // 更新任务状态（个人待办仅本人/管理员；案件任务限案件成员或管理员）

@@ -22,28 +22,55 @@ interface ContactInput {
 
 export default async function caseRoutes(app: FastifyInstance) {
   // 案件列表：关键字搜名称/编号/法院/案号/当事人姓名，支持类型与状态筛选
+  // 翻页：page（1-based，默认 1）、pageSize（默认 20，最大 100）
   app.get('/api/cases', async (req) => {
     const { type, status, keyword } = req.query as any;
-    let sql = `SELECT c.*, u.name as lead_name FROM cases c LEFT JOIN users u ON c.lead_id = u.id WHERE 1=1`;
+    const page = Math.max(1, Number((req.query as any).page) || 1);
+    const pageSize = Math.min(100, Math.max(1, Number((req.query as any).pageSize) || 20));
+    const offset = (page - 1) * pageSize;
+
+    const where: string[] = [];
     const params: any[] = [];
+    if (req.user!.role !== 'admin') {
+      where.push(`c.id IN (SELECT case_id FROM case_members WHERE user_id = ?)`);
+      params.push(req.user!.id);
+    }
+    if (type) { where.push(`c.type = ?`); params.push(type); }
+    if (status) { where.push(`c.status = ?`); params.push(status); }
+    if (keyword?.trim()) {
+      const kw = `%${keyword.trim()}%`;
+      where.push(`(
+        c.name LIKE ? OR c.case_no LIKE ? OR c.court LIKE ?
+        OR (SELECT court_case_no FROM case_legal_info WHERE case_id = c.id) LIKE ?
+        OR EXISTS (SELECT 1 FROM case_parties p WHERE p.case_id = c.id AND p.name LIKE ?)
+      )`);
+      params.push(kw, kw, kw, kw, kw);
+    }
+    const whereSql = where.length ? ` WHERE ${where.join(' AND ')}` : '';
+
+    // 总数
+    const total = (db.prepare(
+      `SELECT COUNT(*) as c FROM cases c${whereSql}`
+    ).get(...params) as { c: number }).c;
+
+    const sql = `SELECT c.*, u.name as lead_name FROM cases c
+                 LEFT JOIN users u ON c.lead_id = u.id${whereSql}
+                 ORDER BY c.created_at DESC LIMIT ? OFFSET ?`;
+    const cases = db.prepare(sql).all(...params, pageSize, offset);
+    return { cases, total, page, pageSize, typeLabels: CASE_TYPE_LABELS };
+  });
+
+  // 案件下拉选择：返回当前用户可见的全部案件（仅 id/name/case_no），供筛选下拉使用，不分页
+  app.get('/api/cases/select', async (req) => {
+    const params: any[] = [];
+    let sql = `SELECT c.id, c.case_no, c.name FROM cases c WHERE 1=1`;
     if (req.user!.role !== 'admin') {
       sql += ` AND c.id IN (SELECT case_id FROM case_members WHERE user_id = ?)`;
       params.push(req.user!.id);
     }
-    if (type) { sql += ` AND c.type = ?`; params.push(type); }
-    if (status) { sql += ` AND c.status = ?`; params.push(status); }
-    if (keyword?.trim()) {
-      const kw = `%${keyword.trim()}%`;
-      sql += ` AND (
-        c.name LIKE ? OR c.case_no LIKE ? OR c.court LIKE ?
-        OR (SELECT court_case_no FROM case_legal_info WHERE case_id = c.id) LIKE ?
-        OR EXISTS (SELECT 1 FROM case_parties p WHERE p.case_id = c.id AND p.name LIKE ?)
-      )`;
-      params.push(kw, kw, kw, kw, kw);
-    }
     sql += ` ORDER BY c.created_at DESC`;
     const cases = db.prepare(sql).all(...params);
-    return { cases, typeLabels: CASE_TYPE_LABELS };
+    return { cases };
   });
 
   // 案件详情

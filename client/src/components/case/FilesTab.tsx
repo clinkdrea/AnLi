@@ -353,7 +353,7 @@ function CopyFromCaseModal({ caseId, onClose, onCopied }: any) {
   const [copying, setCopying] = useState(false);
 
   useEffect(() => {
-    api('/cases').then((d) => setCases((d.cases || []).filter((c: any) => String(c.id) !== String(caseId))));
+    api('/cases/select').then((d) => setCases((d.cases || []).filter((c: any) => String(c.id) !== String(caseId))));
   }, [caseId]);
   useEffect(() => {
     if (!selected) return;
