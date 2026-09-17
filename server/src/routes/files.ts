@@ -17,8 +17,11 @@ export default async function fileRoutes(app: FastifyInstance) {
       return reply.status(403).send({ error: '无权访问' });
     }
     const files = db.prepare(
-      `SELECT f.*, u.name as uploader_name FROM file_records f
+      `SELECT f.*, u.name as uploader_name,
+              COALESCE(o.ocr_status, 'pending') as ocr_status, o.ocr_text
+       FROM file_records f
        LEFT JOIN users u ON f.uploaded_by = u.id
+       LEFT JOIN file_ocr_text o ON o.file_id = f.id
        WHERE f.case_id = ? AND COALESCE(f.category, 'file') != 'evidence'
        ORDER BY f.created_at DESC`
     ).all(cid);
@@ -193,8 +196,11 @@ export default async function fileRoutes(app: FastifyInstance) {
     }
     logAudit(req.user!.id, 'file_ocr', 'file', fid, `force=${force} status=${status}`);
     // 返回最新记录（含 ocr_text），前端可直接展示
-    const fresh = db.prepare('SELECT ocr_status, ocr_text FROM file_records WHERE id = ?').get(fid) as any;
-    return { ok: true, status: fresh.ocr_status, ocr_text: fresh.ocr_text };
+    const fresh = db.prepare(
+      `SELECT COALESCE(o.ocr_status, 'pending') as ocr_status, o.ocr_text
+       FROM file_ocr_text o WHERE o.file_id = ?`
+    ).get(fid) as any;
+    return { ok: true, status: fresh?.ocr_status || 'pending', ocr_text: fresh?.ocr_text || null };
   });
 
   // 复制文书：从文书模板库（支持单个 template_id 或批量 template_ids）

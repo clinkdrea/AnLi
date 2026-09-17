@@ -1,9 +1,13 @@
 import type { FastifyInstance } from 'fastify';
 import { db } from '../db/schema.js';
+import { cleanupNotifications } from '../services/cleanup.js';
 
 export default async function notificationRoutes(app: FastifyInstance) {
   // 通知列表：支持 offset 翻页（"加载更多"模式），默认每页 20 条
   app.get('/api/notifications', async (req) => {
+    // 懒执行：查询时顺手清理超过 30 天的已读通知
+    try { cleanupNotifications(); } catch { /* 忽略 */ }
+
     const { unread_only } = req.query as any;
     const offset = Math.max(0, Number((req.query as any).offset) || 0);
     const limit = Math.min(100, Math.max(1, Number((req.query as any).limit) || 20));

@@ -26,6 +26,7 @@ import notificationRoutes from './routes/notifications.js';
 import exportRoutes from './routes/export.js';
 import { startOCRWorker } from './services/ocr.js';
 import { scanTemplates } from './services/templates-scan.js';
+import { runStartupCleanup } from './services/cleanup.js';
 import { config } from './config.js';
 
 // 高频心跳路径不打请求日志，避免控制台噪声（通知轮询、健康检查等）
@@ -58,6 +59,13 @@ initDb();
 seed();
 // 启动时扫描文书模板目录（增量，已存在则跳过）
 try { scanTemplates(); } catch (e) { app.log.error(e, '模板扫描失败'); }
+// 启动时执行历史数据清理（审计日志 90 天、已读通知 30 天）
+try {
+  const r = runStartupCleanup();
+  if (r.auditDeleted || r.notifDeleted) {
+    app.log.info(`启动清理：审计日志删除 ${r.auditDeleted} 条，通知删除 ${r.notifDeleted} 条`);
+  }
+} catch (e) { app.log.error(e, '启动清理失败'); }
 
 authPlugin(app);
 

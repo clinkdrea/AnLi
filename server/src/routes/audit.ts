@@ -1,8 +1,12 @@
 import type { FastifyInstance } from 'fastify';
 import { db } from '../db/schema.js';
+import { cleanupAuditLogs } from '../services/cleanup.js';
 
 export default async function auditRoutes(app: FastifyInstance) {
   app.get('/api/audit/logs', async (req, reply) => {
+    // 懒执行：查询时顺手清理超过 90 天的审计日志
+    try { cleanupAuditLogs(); } catch { /* 忽略 */ }
+
     if (req.user!.role !== 'admin') return reply.status(403).send({ error: '仅管理员' });
     const { action, user_id, object_type, from, to } = req.query as any;
     const page = Math.max(1, Number((req.query as any).page) || 1);

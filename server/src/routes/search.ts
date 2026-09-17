@@ -42,9 +42,10 @@ export default async function searchRoutes(app: FastifyInstance) {
 
     // 4. 文件名 + OCR 文本
     const files = db.prepare(
-      `SELECT f.id, f.file_name, f.ocr_text, f.case_id, c.name as case_name
+      `SELECT f.id, f.file_name, o.ocr_text, f.case_id, c.name as case_name
        FROM file_records f JOIN cases c ON f.case_id = c.id
-       WHERE f.case_id IN (${placeholders}) AND (f.file_name LIKE ? OR f.ocr_text LIKE ?)`
+       LEFT JOIN file_ocr_text o ON o.file_id = f.id
+       WHERE f.case_id IN (${placeholders}) AND (f.file_name LIKE ? OR o.ocr_text LIKE ?)`
     ).all(...myCaseIds, `%${q}%`, `%${q}%`);
     files.forEach((f: any) => results.push({ type: 'file', id: f.id, title: f.file_name, sub: f.case_name, case_id: f.case_id }));
 

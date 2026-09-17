@@ -59,8 +59,10 @@ export default async function evidenceRoutes(app: FastifyInstance) {
        WHERE e.case_id = ? ORDER BY (e.group_name IS NULL), e.group_name, e.id`
     ).all(cid) as any[];
     const files = db.prepare(
-      `SELECT ef.evidence_id, fr.id, fr.file_name, fr.mime_type, fr.size, fr.ocr_status, fr.ocr_text
+      `SELECT ef.evidence_id, fr.id, fr.file_name, fr.mime_type, fr.size,
+              COALESCE(o.ocr_status, 'pending') as ocr_status, o.ocr_text
        FROM evidence_files ef JOIN file_records fr ON ef.file_id = fr.id
+       LEFT JOIN file_ocr_text o ON o.file_id = fr.id
        WHERE fr.case_id = ? ORDER BY ef.id`
     ).all(cid) as any[];
     const fileMap = new Map<number, any[]>();

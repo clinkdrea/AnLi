@@ -159,10 +159,15 @@ export function initDb() {
       mime_type TEXT,
       size INTEGER NOT NULL,
       category TEXT NOT NULL DEFAULT 'file',
-      ocr_status TEXT NOT NULL DEFAULT 'pending' CHECK(ocr_status IN ('pending','processing','done','failed')),
-      ocr_text TEXT,
       uploaded_by INTEGER NOT NULL REFERENCES users(id),
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    -- OCR 文本独立存储：避免大文本膨胀 file_records 主表，file_id 与 file_records 一对一
+    CREATE TABLE IF NOT EXISTS file_ocr_text (
+      file_id INTEGER PRIMARY KEY REFERENCES file_records(id) ON DELETE CASCADE,
+      ocr_status TEXT NOT NULL DEFAULT 'pending' CHECK(ocr_status IN ('pending','processing','done','failed')),
+      ocr_text TEXT,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE TABLE IF NOT EXISTS evidence_files (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -398,6 +403,40 @@ export function initDb() {
     INSERT OR IGNORE INTO evidence_files (evidence_id, file_id)
     SELECT id, file_id FROM evidences WHERE file_id IS NOT NULL
   `);
+
+  // 老库迁移：file_records 的 ocr_status/ocr_text 拆到 file_ocr_text 表
+  // SQLite 不支持直接 DROP COLUMN，需重建表
+  const oldFileCols = db.prepare('PRAGMA table_info(file_records)').all() as { name: string }[];
+  if (oldFileCols.some((c) => c.name === 'ocr_text') || oldFileCols.some((c) => c.name === 'ocr_status')) {
+    db.exec('PRAGMA foreign_keys = OFF');
+    db.exec(`
+      CREATE TABLE file_records_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+        rel_path TEXT NOT NULL,
+        file_name TEXT NOT NULL,
+        mime_type TEXT,
+        size INTEGER NOT NULL,
+        category TEXT NOT NULL DEFAULT 'file',
+        uploaded_by INTEGER NOT NULL REFERENCES users(id),
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `);
+    db.exec(`
+      INSERT INTO file_records_new (id, case_id, rel_path, file_name, mime_type, size, category, uploaded_by, created_at)
+      SELECT id, case_id, rel_path, file_name, mime_type, size, COALESCE(category, 'file'), uploaded_by, created_at
+      FROM file_records
+    `);
+    // 把 OCR 数据搬到独立表（仅迁移有 OCR 状态或文本的记录）
+    db.exec(`
+      INSERT OR IGNORE INTO file_ocr_text (file_id, ocr_status, ocr_text)
+      SELECT id, COALESCE(ocr_status, 'pending'), ocr_text FROM file_records
+      WHERE ocr_status IS NOT NULL OR ocr_text IS NOT NULL
+    `);
+    db.exec('DROP TABLE file_records');
+    db.exec('ALTER TABLE file_records_new RENAME TO file_records');
+    db.exec('PRAGMA foreign_keys = ON');
+  }
 }
 
 export { db, DATA_DIR, CASES_DIR, TEMPLATES_DIR };
