@@ -24,6 +24,7 @@ import knowledgeRoutes from './routes/knowledge.js';
 import auditRoutes from './routes/audit.js';
 import notificationRoutes from './routes/notifications.js';
 import exportRoutes from './routes/export.js';
+import aiAgentRoutes from './routes/ai-agent.js';
 import { startOCRWorker } from './services/ocr.js';
 import { scanTemplates } from './services/templates-scan.js';
 import { runStartupCleanup } from './services/cleanup.js';
@@ -90,6 +91,7 @@ await app.register(knowledgeRoutes);
 await app.register(auditRoutes);
 await app.register(notificationRoutes);
 await app.register(exportRoutes);
+await app.register(aiAgentRoutes);
 
 // 启动 OCR 后台队列
 startOCRWorker();

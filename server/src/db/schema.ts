@@ -237,6 +237,26 @@ export function initDb() {
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+    -- AI 助手聊天线程（每个用户独立，支持多线程）
+    CREATE TABLE IF NOT EXISTS ai_threads (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      case_id INTEGER REFERENCES cases(id) ON DELETE SET NULL,
+      title TEXT NOT NULL DEFAULT '新对话',
+      model TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      last_used_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS ai_thread_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      thread_id INTEGER NOT NULL REFERENCES ai_threads(id) ON DELETE CASCADE,
+      role TEXT NOT NULL CHECK(role IN ('user','assistant','system')),
+      content TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_ai_thread_messages_thread ON ai_thread_messages(thread_id, id);
+    CREATE INDEX IF NOT EXISTS idx_ai_threads_user ON ai_threads(user_id, last_used_at);
     CREATE VIRTUAL TABLE IF NOT EXISTS fts_cases USING fts5(name, content='', tokenize='trigram');
     CREATE VIRTUAL TABLE IF NOT EXISTS fts_notes USING fts5(content, content='', tokenize='trigram');
     CREATE VIRTUAL TABLE IF NOT EXISTS fts_comments USING fts5(content, content='', tokenize='trigram');

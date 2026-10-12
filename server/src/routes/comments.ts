@@ -27,14 +27,17 @@ export default async function commentRoutes(app: FastifyInstance) {
     const { content, parent_id } = req.body as any;
     if (!content?.trim()) return reply.status(400).send({ error: '评论内容不能为空' });
 
-    // 提取 @用户名
-    const mentionMatches = content.match(/@(\S+)/g) || [];
+    // 提取 @用户名；@所有人 表示提及该案件全部成员
+    const mentionMatches = content.match(/@([^\s@]+)/g) || [];
     const mentions: string[] = [];
+    let mentionAll = false;
     for (const m of mentionMatches) {
       const name = m.slice(1);
+      if (name === '所有人') { mentionAll = true; continue; }
       const user = db.prepare('SELECT id FROM users WHERE name = ?').get(name) as any;
-      if (user) mentions.push(name);
+      if (user && !mentions.includes(name)) mentions.push(name);
     }
+    if (mentionAll) mentions.push('所有人');
 
     const info = db.prepare(
       'INSERT INTO comments (case_id, parent_id, content, mentions, author_id) VALUES (?, ?, ?, ?, ?)'
@@ -42,21 +45,33 @@ export default async function commentRoutes(app: FastifyInstance) {
     const cid2 = Number(info.lastInsertRowid);
     logAudit(req.user!.id, 'comment_create', 'comment', cid2, `case=${cid}`);
 
-    // 通知被 @ 的用户
-    for (const name of mentions) {
-      const user = db.prepare('SELECT id FROM users WHERE name = ?').get(name) as any;
-      if (user) {
+    const preview = content.slice(0, 30);
+    if (mentionAll) {
+      // @所有人：案件全部成员（除作者）各发一条 mention 通知，不再叠加普通评论通知
+      const members = db.prepare(
+        'SELECT user_id FROM case_members WHERE case_id = ? AND user_id != ?'
+      ).all(cid, req.user!.id) as any[];
+      for (const m of members) {
         db.prepare('INSERT INTO notifications (user_id, type, content, ref_type, ref_id) VALUES (?, ?, ?, ?, ?)')
-          .run(user.id, 'mention', `您在案件中被 @：${content.slice(0, 30)}`, 'case', String(cid));
+          .run(m.user_id, 'mention', `案件评论中 @了所有人：${preview}`, 'case', String(cid));
       }
-    }
-    // 通知案件其他成员有新评论
-    const members = db.prepare(
-      'SELECT user_id FROM case_members WHERE case_id = ? AND user_id != ?'
-    ).all(cid, req.user!.id) as any[];
-    for (const m of members) {
-      db.prepare('INSERT INTO notifications (user_id, type, content, ref_type, ref_id) VALUES (?, ?, ?, ?, ?)')
-        .run(m.user_id, 'comment', `案件有新评论：${content.slice(0, 30)}`, 'case', String(cid));
+    } else {
+      // 通知被 @ 的用户
+      for (const name of mentions) {
+        const user = db.prepare('SELECT id FROM users WHERE name = ?').get(name) as any;
+        if (user) {
+          db.prepare('INSERT INTO notifications (user_id, type, content, ref_type, ref_id) VALUES (?, ?, ?, ?, ?)')
+            .run(user.id, 'mention', `您在案件中被 @：${preview}`, 'case', String(cid));
+        }
+      }
+      // 通知案件其他成员有新评论
+      const members = db.prepare(
+        'SELECT user_id FROM case_members WHERE case_id = ? AND user_id != ?'
+      ).all(cid, req.user!.id) as any[];
+      for (const m of members) {
+        db.prepare('INSERT INTO notifications (user_id, type, content, ref_type, ref_id) VALUES (?, ?, ?, ?, ?)')
+          .run(m.user_id, 'comment', `案件有新评论：${preview}`, 'case', String(cid));
+      }
     }
 
     return reply.status(201).send({ id: cid2 });

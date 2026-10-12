@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Plus, Trash2, Pencil, X, Check, Phone, MapPin, Building2, IdCard } from 'lucide-react';
 import { api } from '../../api';
 
@@ -17,6 +17,10 @@ const SIDE_CLS: Record<string, string> = {
   contact: 'bg-slate-100 text-slate-600',
 };
 const INPUT = 'border border-slate-300 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-amber-400';
+const SELECT = 'border border-slate-300 rounded px-2 py-1.5 text-sm bg-white focus:outline-none focus:ring-1 focus:ring-amber-400';
+const CUSTOM_CODE = '__custom__';
+
+interface PartyRole { code: string; label: string; }
 
 interface Party {
   id: number; side: string; name: string; party_type: string;
@@ -36,8 +40,21 @@ export default function ContactsTab({ caseId, parties, onChanged }: {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editForm, setEditForm] = useState<any>({});
   const [err, setErr] = useState('');
+  const [partyRoles, setPartyRoles] = useState<Record<string, PartyRole[]>>({});
+
+  useEffect(() => {
+    api('/party-roles').then((d) => setPartyRoles(d.roles || {})).catch(() => {});
+  }, []);
 
   const shown = parties.filter((p) => filter === 'all' || p.side === filter);
+
+  // 判断当前 role 是否命中字典；未命中则视为自定义
+  const roleSelectValue = (side: string, role?: string) => {
+    if (!role) return '';
+    const list = partyRoles[side] || [];
+    if (list.some((r) => r.label === role || r.code === role)) return role;
+    return CUSTOM_CODE;
+  };
 
   const submitAdd = async () => {
     if (!form.name.trim()) { setErr('请填写姓名/名称'); return; }
@@ -61,42 +78,67 @@ export default function ContactsTab({ caseId, parties, onChanged }: {
     await api(`/parties/${p.id}`, { method: 'DELETE' }); onChanged();
   };
 
-  const FormFields = ({ v, set, isCourt }: any) => (
-    <div className="space-y-2">
-      <div className="flex gap-2 flex-wrap">
-        <input value={v.name} onChange={(e) => set({ ...v, name: e.target.value })} placeholder="姓名 / 名称 *"
-          className={`${INPUT} flex-1 min-w-[120px]`} />
-        {!isCourt && (
-          <select value={v.party_type} onChange={(e) => set({ ...v, party_type: e.target.value })}
-            className="border border-slate-300 rounded px-2 py-1.5 text-sm">
-            <option value="natural">自然人</option>
-            <option value="legal">法人/组织</option>
-          </select>
-        )}
-        {isCourt && (
-          <input value={v.role} onChange={(e) => set({ ...v, role: e.target.value })} placeholder="职务（如审判长）"
-            className={`${INPUT} w-44`} />
+  // 角色选择器：下拉 + 自定义输入
+  const RolePicker = ({ v, set, side }: { v: any; set: (x: any) => void; side: string }) => {
+    const list = partyRoles[side] || [];
+    const val = roleSelectValue(side, v.role);
+    return (
+      <div className="flex gap-2 items-center">
+        <select value={val} onChange={(e) => {
+          const nv = e.target.value;
+          if (nv === '') set({ ...v, role: '' });
+          else if (nv === CUSTOM_CODE) set({ ...v, role: v.role || '' }); // 保留原值或空，由输入框填写
+          else set({ ...v, role: nv });
+        }} className={`${SELECT} w-40`}>
+          <option value="">角色（可选）</option>
+          {list.map((r) => <option key={r.code} value={r.label}>{r.label}</option>)}
+          <option value={CUSTOM_CODE}>其他（自定义）</option>
+        </select>
+        {val === CUSTOM_CODE && (
+          <input value={v.role || ''} onChange={(e) => set({ ...v, role: e.target.value })}
+            placeholder="请输入角色/职务" className={`${INPUT} w-40`} />
         )}
       </div>
-      <div className="flex gap-2 flex-wrap">
-        <input value={v.phone} onChange={(e) => set({ ...v, phone: e.target.value })} placeholder="电话"
-          className={`${INPUT} flex-1 min-w-[110px]`} />
-        <input value={v.id_number} onChange={(e) => set({ ...v, id_number: e.target.value })}
-          placeholder={v.party_type === 'legal' && !isCourt ? '统一社会信用代码' : '身份证号'}
-          className={`${INPUT} flex-1 min-w-[150px]`} />
-        {!isCourt && (
-          <input value={v.organization} onChange={(e) => set({ ...v, organization: e.target.value })} placeholder="工作单位"
+    );
+  };
+
+  const FormFields = ({ v, set }: any) => {
+    const side = v.category || v.side || 'contact';
+    const isCourt = side === 'court';
+    return (
+      <div className="space-y-2">
+        <div className="flex gap-2 flex-wrap items-center">
+          <input value={v.name} onChange={(e) => set({ ...v, name: e.target.value })} placeholder="姓名 / 名称 *"
+            className={`${INPUT} flex-1 min-w-[120px]`} />
+          {!isCourt && (
+            <select value={v.party_type} onChange={(e) => set({ ...v, party_type: e.target.value })}
+              className={SELECT}>
+              <option value="natural">自然人</option>
+              <option value="legal">法人/组织</option>
+            </select>
+          )}
+          <RolePicker v={v} set={set} side={side} />
+        </div>
+        <div className="flex gap-2 flex-wrap">
+          <input value={v.phone} onChange={(e) => set({ ...v, phone: e.target.value })} placeholder="电话"
             className={`${INPUT} flex-1 min-w-[110px]`} />
-        )}
+          <input value={v.id_number} onChange={(e) => set({ ...v, id_number: e.target.value })}
+            placeholder={v.party_type === 'legal' && !isCourt ? '统一社会信用代码' : '身份证号'}
+            className={`${INPUT} flex-1 min-w-[150px]`} />
+          {!isCourt && (
+            <input value={v.organization} onChange={(e) => set({ ...v, organization: e.target.value })} placeholder="工作单位"
+              className={`${INPUT} flex-1 min-w-[110px]`} />
+          )}
+        </div>
+        <div className="flex gap-2">
+          <input value={v.address} onChange={(e) => set({ ...v, address: e.target.value })} placeholder="地址"
+            className={`${INPUT} flex-1`} />
+          <input value={v.remark} onChange={(e) => set({ ...v, remark: e.target.value })} placeholder="备注"
+            className={`${INPUT} flex-1`} />
+        </div>
       </div>
-      <div className="flex gap-2">
-        <input value={v.address} onChange={(e) => set({ ...v, address: e.target.value })} placeholder="地址"
-          className={`${INPUT} flex-1`} />
-        <input value={v.remark} onChange={(e) => set({ ...v, remark: e.target.value })} placeholder="备注"
-          className={`${INPUT} flex-1`} />
-      </div>
-    </div>
-  );
+    );
+  };
 
   return (
     <div>
@@ -125,10 +167,10 @@ export default function ContactsTab({ caseId, parties, onChanged }: {
       {adding && (
         <div className="bg-white rounded shadow p-4 mb-4 space-y-2">
           <select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })}
-            className="border border-slate-300 rounded px-2 py-1.5 text-sm mb-1">
+            className={`${SELECT} mb-1`}>
             {CATEGORIES.map((c) => <option key={c.v} value={c.v}>{c.l}</option>)}
           </select>
-          <FormFields v={form} set={setForm} isCourt={form.category === 'court'} />
+          <FormFields v={form} set={setForm} />
           {err && <div className="text-red-500 text-xs">{err}</div>}
           <div className="flex gap-2 justify-end">
             <button onClick={submitAdd} className="bg-amber-500 text-white px-3 py-1.5 rounded text-sm flex items-center gap-1"><Check className="w-4 h-4" /> 保存</button>
@@ -142,7 +184,7 @@ export default function ContactsTab({ caseId, parties, onChanged }: {
           <div key={p.id} className="px-4 py-3 border-b last:border-0 hover:bg-slate-50">
             {editingId === p.id ? (
               <div className="space-y-2">
-                <FormFields v={editForm} set={setEditForm} isCourt={p.side === 'court'} />
+                <FormFields v={{ ...editForm, category: p.side }} set={setEditForm} />
                 <div className="flex gap-2 justify-end">
                   <button onClick={submitEdit} className="text-green-600 p-1"><Check className="w-4 h-4" /></button>
                   <button onClick={() => setEditingId(null)} className="text-slate-400 p-1"><X className="w-4 h-4" /></button>
@@ -157,7 +199,7 @@ export default function ContactsTab({ caseId, parties, onChanged }: {
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="font-medium text-sm">{p.name}</span>
                     <span className="text-xs text-slate-400">{p.party_type === 'legal' ? '法人/组织' : '自然人'}</span>
-                    {p.role && <span className="text-xs text-purple-600">{p.role}</span>}
+                    {p.role && <span className="text-xs text-purple-600 bg-purple-50 px-1.5 py-0.5 rounded">{p.role}</span>}
                   </div>
                   <div className="flex gap-x-4 gap-y-0.5 flex-wrap mt-1 text-xs text-slate-500">
                     {p.phone && <span className="flex items-center gap-1"><Phone className="w-3 h-3" />{p.phone}</span>}

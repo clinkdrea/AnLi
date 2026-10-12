@@ -351,10 +351,26 @@ function CopyFromCaseModal({ caseId, onClose, onCopied }: any) {
   const [msg, setMsg] = useState('');
   const [sel, setSel] = useState<Set<number>>(new Set());
   const [copying, setCopying] = useState(false);
+  const [keyword, setKeyword] = useState('');
+  const [searching, setSearching] = useState(false);
 
+  // 搜索：debounce 300ms，带 loading 态；首次加载不带关键字
   useEffect(() => {
-    api('/cases/select').then((d) => setCases((d.cases || []).filter((c: any) => String(c.id) !== String(caseId))));
-  }, [caseId]);
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      setSearching(true);
+      try {
+        const url = keyword.trim() ? `/cases/select?keyword=${encodeURIComponent(keyword.trim())}` : '/cases/select';
+        const d = await api(url);
+        if (cancelled) return;
+        setCases((d.cases || []).filter((c: any) => String(c.id) !== String(caseId)));
+      } finally {
+        if (!cancelled) setSearching(false);
+      }
+    }, 300);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [caseId, keyword]);
+
   useEffect(() => {
     if (!selected) return;
     setSel(new Set());
@@ -380,6 +396,11 @@ function CopyFromCaseModal({ caseId, onClose, onCopied }: any) {
     finally { setCopying(false); }
   };
 
+  // 列表渲染上限：避免一次性渲染过多 DOM 影响性能；超出提示继续搜索
+  const RENDER_LIMIT = 100;
+  const shown = cases.slice(0, RENDER_LIMIT);
+  const overflow = cases.length - shown.length;
+
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
       <div className="bg-white rounded-lg p-5 w-[560px] max-h-[80vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
@@ -388,17 +409,36 @@ function CopyFromCaseModal({ caseId, onClose, onCopied }: any) {
           <button onClick={onClose} className="text-slate-400"><X className="w-5 h-5" /></button>
         </div>
         {!selected ? (
-          <div className="overflow-y-auto flex-1 divide-y">
-            {cases.map((c) => (
-              <button key={c.id} onClick={() => setSelected(c)}
-                className="w-full text-left py-2.5 hover:bg-slate-50 flex items-center gap-2">
-                <FolderInput className="w-4 h-4 text-amber-500" />
-                <span className="text-sm">{c.name}</span>
-                <span className="text-xs text-slate-400 ml-auto">{c.case_no}</span>
-              </button>
-            ))}
-            {cases.length === 0 && <div className="py-8 text-center text-slate-400 text-sm">没有其他案件</div>}
-          </div>
+          <>
+            <div className="relative mb-3">
+              <Search className="w-4 h-4 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+              <input value={keyword} onChange={(e) => setKeyword(e.target.value)}
+                placeholder="搜索案件名称或案号..."
+                className="w-full border border-slate-300 rounded pl-8 pr-3 py-2 text-sm focus:outline-none focus:border-amber-400" />
+            </div>
+            <div className="overflow-y-auto flex-1 divide-y">
+              {searching && cases.length === 0 ? (
+                <div className="py-8 text-center text-slate-400 text-sm">搜索中...</div>
+              ) : shown.map((c) => (
+                <button key={c.id} onClick={() => setSelected(c)}
+                  className="w-full text-left py-2.5 hover:bg-slate-50 flex items-center gap-2">
+                  <FolderInput className="w-4 h-4 text-amber-500" />
+                  <span className="text-sm flex-1 min-w-0 truncate">{c.name}</span>
+                  <span className="text-xs text-slate-400 shrink-0">{c.case_no}</span>
+                </button>
+              ))}
+              {!searching && cases.length === 0 && (
+                <div className="py-8 text-center text-slate-400 text-sm">
+                  {keyword ? '没有匹配的案件' : '没有其他案件'}
+                </div>
+              )}
+            </div>
+            {overflow > 0 && (
+              <div className="text-xs text-slate-400 mt-2 text-center">
+                已显示前 {RENDER_LIMIT} 个，还有 {overflow} 个未显示，请输入关键字缩小范围
+              </div>
+            )}
+          </>
         ) : (
           <>
             <button onClick={() => { setSelected(null); setSel(new Set()); }} className="text-xs text-amber-600 hover:underline mb-2 text-left">

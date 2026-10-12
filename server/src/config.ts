@@ -29,6 +29,10 @@ export const config = {
   CASES_DIR: process.env.ANLI_CASES_DIR ? resolvePath(process.env.ANLI_CASES_DIR) : '',
   // 文书模板文件夹（仅本地留档，不上传 GitHub；可指向任意外部模板库）
   TEMPLATES_DIR: process.env.ANLI_TEMPLATES_DIR ? resolvePath(process.env.ANLI_TEMPLATES_DIR) : '',
+  // 法律 skills 库（cat-xierluo/legal-skills），默认放在数据目录下，不纳入 git
+  LEGAL_SKILLS_DIR: process.env.ANLI_LEGAL_SKILLS_DIR
+    ? resolvePath(process.env.ANLI_LEGAL_SKILLS_DIR)
+    : resolvePath((process.env.ANLI_DATA_DIR || './data') + '/legal-skills'),
   // 案件导出文件夹
   EXPORTS_DIR: process.env.ANLI_EXPORTS_DIR ? resolvePath(process.env.ANLI_EXPORTS_DIR) : '',
   JWT_SECRET: process.env.JWT_SECRET || 'anli-local-secret-change-me',
@@ -38,4 +42,7 @@ export const config = {
   OPENAI_BASE_URL: process.env.OPENAI_BASE_URL || '',
   OPENAI_API_KEY: process.env.OPENAI_API_KEY || '',
   AI_MODEL: process.env.AI_MODEL || 'qwen3:8b',
+  // AI 助手可选模型（默认本地 ollama）
+  AI_MODELS: (process.env.AI_MODELS || 'qwen3:8b,qwen3.6:27b')
+    .split(',').map((s) => s.trim()).filter(Boolean),
 };

@@ -5,6 +5,7 @@ import { db, CASES_DIR } from '../db/schema.js';
 import { STAGE_TEMPLATES, CASE_TYPE_LABELS } from '../db/seed.js';
 import { isCaseMember } from '../plugins/auth.js';
 import { logAudit } from '../services/audit.js';
+import { PARTY_ROLES, SIDE_LABELS } from '../constants/party-roles.js';
 
 function genCaseNo(type: string): string {
   const year = new Date().getFullYear();
@@ -21,6 +22,11 @@ interface ContactInput {
 }
 
 export default async function caseRoutes(app: FastifyInstance) {
+  // 联系人角色字典（按 side 分组的候选角色 + side 中文标签）
+  app.get('/api/party-roles', async () => {
+    return { roles: PARTY_ROLES, sideLabels: SIDE_LABELS };
+  });
+
   // 案件列表：关键字搜名称/编号/法院/案号/当事人姓名，支持类型与状态筛选
   // 翻页：page（1-based，默认 1）、pageSize（默认 20，最大 100）
   app.get('/api/cases', async (req) => {
@@ -62,13 +68,19 @@ export default async function caseRoutes(app: FastifyInstance) {
 
   // 案件下拉选择：返回当前用户可见的全部案件（仅 id/name/case_no），供筛选下拉使用，不分页
   app.get('/api/cases/select', async (req) => {
+    const { keyword } = req.query as { keyword?: string };
     const params: any[] = [];
     let sql = `SELECT c.id, c.case_no, c.name FROM cases c WHERE 1=1`;
     if (req.user!.role !== 'admin') {
       sql += ` AND c.id IN (SELECT case_id FROM case_members WHERE user_id = ?)`;
       params.push(req.user!.id);
     }
-    sql += ` ORDER BY c.created_at DESC`;
+    if (keyword && keyword.trim()) {
+      const kw = `%${keyword.trim()}%`;
+      sql += ` AND (c.name LIKE ? OR c.case_no LIKE ?)`;
+      params.push(kw, kw);
+    }
+    sql += ` ORDER BY c.created_at DESC LIMIT 500`;
     const cases = db.prepare(sql).all(...params);
     return { cases };
   });

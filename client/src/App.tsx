@@ -10,6 +10,7 @@ import CaseDetail from './pages/CaseDetail';
 import Search from './pages/Search';
 import Conflict from './pages/Conflict';
 import Templates from './pages/Templates';
+import AIAssistant from './pages/AIAssistant';
 import Knowledge from './pages/Knowledge';
 import Audit from './pages/Audit';
 import Users from './pages/Users';
@@ -34,6 +35,7 @@ export default function App() {
         <Route path="/cases/:id" element={<CaseDetail />} />
         <Route path="/search" element={<Search />} />
         <Route path="/conflicts" element={<Conflict />} />
+        <Route path="/ai-assistant" element={<AIAssistant />} />
         <Route path="/templates" element={<Templates />} />
         <Route path="/knowledge" element={<Knowledge />} />
         <Route path="/audit" element={<Audit />} />

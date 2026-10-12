@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Plus, Trash2 } from 'lucide-react';
 import { api } from '../api';
 import { CASE_TYPES } from '../constants';
@@ -10,6 +10,8 @@ const CATEGORIES = [
   { v: 'court', l: '法院人员' },
   { v: 'contact', l: '其他联系人' },
 ];
+const CUSTOM_CODE = '__custom__';
+interface PartyRole { code: string; label: string; }
 interface Contact {
   category: string; name: string; party_type: string; id_number: string;
   phone: string; address: string; organization: string; role: string; remark: string;
@@ -32,6 +34,11 @@ export default function NewCaseModal({ onClose }: any) {
   const [contacts, setContacts] = useState<Contact[]>([emptyContact('our'), emptyContact('opponent')]);
   const [errors, setErrors] = useState<any>({});
   const [loading, setLoading] = useState(false);
+  const [partyRoles, setPartyRoles] = useState<Record<string, PartyRole[]>>({});
+
+  useEffect(() => {
+    api('/party-roles').then((d) => setPartyRoles(d.roles || {})).catch(() => {});
+  }, []);
 
   const upd = (i: number, k: keyof Contact, v: string) =>
     setContacts((cs) => cs.map((c, j) => (j === i ? { ...c, [k]: v } : c)));
@@ -42,6 +49,13 @@ export default function NewCaseModal({ onClose }: any) {
     if (!p.contacts) return p;
     const arr = { ...p.contacts }; delete arr[i]; return { ...p, contacts: arr };
   });
+
+  const roleSelectValue = (side: string, role?: string) => {
+    if (!role) return '';
+    const list = partyRoles[side] || [];
+    if (list.some((r) => r.label === role || r.code === role)) return role;
+    return CUSTOM_CODE;
+  };
 
   const validate = () => {
     const e: any = {};
@@ -75,6 +89,30 @@ export default function NewCaseModal({ onClose }: any) {
     } catch (err: any) { setErrors({ submit: err.message }); }
     finally { setLoading(false); }
   };
+
+  const RolePicker = ({ i, c }: { i: number; c: Contact }) => {
+    const list = partyRoles[c.category] || [];
+    const val = roleSelectValue(c.category, c.role);
+    return (
+      <div className="flex gap-2 items-center">
+        <select value={val} onChange={(e) => {
+          const nv = e.target.value;
+          if (nv === '') upd(i, 'role', '');
+          else if (nv === CUSTOM_CODE) upd(i, 'role', c.role || '');
+          else upd(i, 'role', nv);
+        }} className="border border-slate-300 rounded px-2 py-1.5 text-sm bg-white">
+          <option value="">角色（可选）</option>
+          {list.map((r) => <option key={r.code} value={r.label}>{r.label}</option>)}
+          <option value={CUSTOM_CODE}>其他（自定义）</option>
+        </select>
+        {val === CUSTOM_CODE && (
+          <input value={c.role || ''} onChange={(e) => upd(i, 'role', e.target.value)}
+            placeholder="请输入角色/职务" className="border border-slate-300 rounded px-2 py-1.5 text-sm w-40" />
+        )}
+      </div>
+    );
+  };
+
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
@@ -151,10 +189,7 @@ export default function NewCaseModal({ onClose }: any) {
                           <option value="legal">法人/组织</option>
                         </select>
                       )}
-                      {c.category === 'court' && (
-                        <input value={c.role} onChange={(e) => upd(i, 'role', e.target.value)}
-                          placeholder="职务（如审判长）" className="border border-slate-300 rounded px-2 py-1.5 text-sm w-40" />
-                      )}
+                      <RolePicker i={i} c={c} />
                       {contacts.length > 2 && (
                         <button type="button" onClick={() => delContact(i)}
                           className="text-red-400 hover:text-red-600 p-1.5"><Trash2 className="w-4 h-4" /></button>
