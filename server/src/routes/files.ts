@@ -3,11 +3,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { exec } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
-import { db, TEMPLATES_DIR } from '../db/schema.js';
+import { db } from '../db/schema.js';
 import { isCaseMember } from '../plugins/auth.js';
 import { logAudit } from '../services/audit.js';
 import { triggerOCR } from '../services/ocr.js';
 import { guessMime } from '../services/mime.js';
+import { caseDir, ensureCaseDir, resolveTemplatesRoot } from '../services/settings.js';
+import { syncCaseFolder } from '../services/folder-sync.js';
 
 export default async function fileRoutes(app: FastifyInstance) {
   // 文件列表
@@ -16,16 +18,50 @@ export default async function fileRoutes(app: FastifyInstance) {
     if (req.user!.role !== 'admin' && !isCaseMember(req.user!.id, cid)) {
       return reply.status(403).send({ error: '无权访问' });
     }
+    // ?sync=1：打开列表/刷新时先扫描案件文件夹，使磁盘上的增删改反映到列表
+    if ((req.query as any).sync === '1') {
+      const caseRow = db.prepare('SELECT id, folder_path FROM cases WHERE id = ?').get(cid) as any;
+      if (caseRow) {
+        try {
+          syncCaseFolder(caseRow);
+        } catch (e) {
+          req.log.error(e, '案件文件夹同步失败');
+        }
+      }
+    }
     const files = db.prepare(
       `SELECT f.*, u.name as uploader_name,
               COALESCE(o.ocr_status, 'pending') as ocr_status, o.ocr_text
        FROM file_records f
        LEFT JOIN users u ON f.uploaded_by = u.id
        LEFT JOIN file_ocr_text o ON o.file_id = f.id
-       WHERE f.case_id = ? AND COALESCE(f.category, 'file') != 'evidence'
+       WHERE f.case_id = ?
        ORDER BY f.created_at DESC`
     ).all(cid);
     return { files };
+  });
+
+  // 打开案件文件夹（本机系统命令），便于用户在文件夹中直接增删改文件
+  app.post('/api/cases/:id/open-folder', async (req, reply) => {
+    const cid = Number((req.params as any).id);
+    if (req.user!.role !== 'admin' && !isCaseMember(req.user!.id, cid)) {
+      return reply.status(403).send({ error: '无权访问' });
+    }
+    const caseRow = db.prepare('SELECT folder_path FROM cases WHERE id = ?').get(cid) as any;
+    if (!caseRow) return reply.status(404).send({ error: '案件不存在' });
+    let dir: string;
+    try {
+      dir = ensureCaseDir(caseRow.folder_path);
+    } catch (e: any) {
+      return reply.status(404).send({ error: e.message });
+    }
+    const cmd = process.platform === 'darwin' ? 'open'
+      : process.platform === 'win32' ? 'explorer' : 'xdg-open';
+    exec(`${cmd} ${JSON.stringify(dir)}`, (err) => {
+      if (err) console.error('open case folder failed:', err);
+    });
+    logAudit(req.user!.id, 'case_folder_open', 'case', cid, dir);
+    return { ok: true, path: dir };
   });
 
   // 上传文件（multipart）
@@ -36,20 +72,26 @@ export default async function fileRoutes(app: FastifyInstance) {
     }
     const caseRow = db.prepare('SELECT folder_path FROM cases WHERE id = ?').get(cid) as any;
     if (!caseRow) return reply.status(404).send({ error: '案件不存在' });
+    let dir: string;
+    try {
+      dir = ensureCaseDir(caseRow.folder_path);
+    } catch (e: any) {
+      return reply.status(500).send({ error: e.message });
+    }
 
     const parts = req.parts();
     const uploaded: any[] = [];
     for await (const part of parts) {
       if (part.type === 'file') {
         const safeName = path.basename(part.filename).replace(/[^\w.\-\u4e00-\u9fa5]/g, '_');
-        const destPath = path.join(caseRow.folder_path, safeName);
+        const destPath = path.join(dir, safeName);
         // 防止覆盖：若已存在则加序号
         let finalPath = destPath;
         let counter = 1;
         while (fs.existsSync(finalPath)) {
           const ext = path.extname(safeName);
           const base = path.basename(safeName, ext);
-          finalPath = path.join(caseRow.folder_path, `${base}_${counter}${ext}`);
+          finalPath = path.join(dir, `${base}_${counter}${ext}`);
           counter++;
         }
         await pipeline(part.file, fs.createWriteStream(finalPath));
@@ -75,7 +117,7 @@ export default async function fileRoutes(app: FastifyInstance) {
       return reply.status(403).send({ error: '无权访问' });
     }
     const caseRow = db.prepare('SELECT folder_path FROM cases WHERE id = ?').get(file.case_id) as any;
-    const fullPath = path.join(caseRow.folder_path, file.rel_path);
+    const fullPath = path.join(caseDir(caseRow.folder_path), file.rel_path);
     if (!fs.existsSync(fullPath)) return reply.status(404).send({ error: '文件已丢失' });
     logAudit(req.user!.id, 'file_download', 'file', fid, file.file_name);
     const encoded = encodeURIComponent(file.file_name);
@@ -95,7 +137,7 @@ export default async function fileRoutes(app: FastifyInstance) {
       return reply.status(403).send({ error: '无权访问' });
     }
     const caseRow = db.prepare('SELECT folder_path FROM cases WHERE id = ?').get(file.case_id) as any;
-    const fullPath = path.join(caseRow.folder_path, file.rel_path);
+    const fullPath = path.join(caseDir(caseRow.folder_path), file.rel_path);
     if (!fs.existsSync(fullPath)) return reply.status(404).send({ error: '文件已丢失' });
     exec(`open ${JSON.stringify(fullPath)}`, (err) => {
       if (err) {
@@ -132,12 +174,13 @@ export default async function fileRoutes(app: FastifyInstance) {
     if (!safeBase) return reply.status(400).send({ error: '文件名不合法' });
 
     const caseRow = db.prepare('SELECT folder_path FROM cases WHERE id = ?').get(file.case_id) as any;
-    const oldFull = path.join(caseRow.folder_path, file.rel_path);
+    const baseDir = caseDir(caseRow.folder_path);
+    const oldFull = path.join(baseDir, file.rel_path);
     if (!fs.existsSync(oldFull)) return reply.status(404).send({ error: '文件已丢失，无法重命名' });
 
-    // rel_path 的目录部分保持不变（证据文件位于 evidence/ 子目录）
+    // rel_path 的目录部分保持不变（历史证据文件位于 evidence/ 子目录，同样保留）
     const relDir = path.dirname(file.rel_path);
-    const dir = relDir === '.' ? caseRow.folder_path : path.join(caseRow.folder_path, relDir);
+    const dir = relDir === '.' ? baseDir : path.join(baseDir, relDir);
 
     // 新名与原名相同（含扩展名）：无需改动，直接返回
     const targetName = safeBase + oldExt;
@@ -170,7 +213,7 @@ export default async function fileRoutes(app: FastifyInstance) {
       return reply.status(403).send({ error: '无权访问' });
     }
     const caseRow = db.prepare('SELECT folder_path FROM cases WHERE id = ?').get(file.case_id) as any;
-    const fullPath = path.join(caseRow.folder_path, file.rel_path);
+    const fullPath = path.join(caseDir(caseRow.folder_path), file.rel_path);
     if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
     db.prepare('DELETE FROM file_records WHERE id = ?').run(fid);
     logAudit(req.user!.id, 'file_delete', 'file', fid, file.file_name);
@@ -215,23 +258,26 @@ export default async function fileRoutes(app: FastifyInstance) {
     if (ids.length === 0) return reply.status(400).send({ error: '未指定模板' });
     const caseRow = db.prepare('SELECT folder_path FROM cases WHERE id = ?').get(cid) as any;
     if (!caseRow) return reply.status(404).send({ error: '案件不存在' });
+    let dir: string;
+    try { dir = ensureCaseDir(caseRow.folder_path); }
+    catch (e: any) { return reply.status(500).send({ error: e.message }); }
 
     const copied: string[] = [];
     const failed: string[] = [];
     for (const tid of ids) {
       const tpl = db.prepare('SELECT * FROM templates WHERE id = ?').get(tid) as any;
       if (!tpl || !tpl.is_file || !tpl.file_path) { failed.push(`模板#${tid}`); continue; }
-      const src = path.resolve(TEMPLATES_DIR, tpl.file_path);
-      if (!src.startsWith(path.resolve(TEMPLATES_DIR) + path.sep) || !fs.existsSync(src)) {
+      const src = path.resolve(resolveTemplatesRoot(), tpl.file_path);
+      if (!src.startsWith(path.resolve(resolveTemplatesRoot()) + path.sep) || !fs.existsSync(src)) {
         failed.push(tpl.name || `模板#${tid}`); continue;
       }
       // 防覆盖命名
       const ext = path.extname(src);
       const base = tpl.name || path.basename(src, ext);
-      let destPath = path.join(caseRow.folder_path, `${base}${ext}`);
+      let destPath = path.join(dir, `${base}${ext}`);
       let counter = 1;
       while (fs.existsSync(destPath)) {
-        destPath = path.join(caseRow.folder_path, `${base}_${counter}${ext}`);
+        destPath = path.join(dir, `${base}_${counter}${ext}`);
         counter++;
       }
       fs.copyFileSync(src, destPath);
@@ -259,6 +305,9 @@ export default async function fileRoutes(app: FastifyInstance) {
     if (ids.length === 0) return reply.status(400).send({ error: '未指定文件' });
     const caseRow = db.prepare('SELECT folder_path FROM cases WHERE id = ?').get(cid) as any;
     if (!caseRow) return reply.status(404).send({ error: '案件不存在' });
+    let dir: string;
+    try { dir = ensureCaseDir(caseRow.folder_path); }
+    catch (e: any) { return reply.status(500).send({ error: e.message }); }
 
     const copied: string[] = [];
     const failed: string[] = [];
@@ -268,15 +317,15 @@ export default async function fileRoutes(app: FastifyInstance) {
       if (req.user!.role !== 'admin' && !isCaseMember(req.user!.id, src.case_id)) { failed.push(src.file_name); continue; }
       if (src.case_id === cid) { failed.push(src.file_name); continue; }
       const srcCase = db.prepare('SELECT folder_path FROM cases WHERE id = ?').get(src.case_id) as any;
-      const srcPath = srcCase ? path.join(srcCase.folder_path, src.rel_path) : '';
+      const srcPath = srcCase ? path.join(caseDir(srcCase.folder_path), src.rel_path) : '';
       if (!srcCase || !fs.existsSync(srcPath)) { failed.push(src.file_name); continue; }
 
       const ext = path.extname(src.file_name);
       const base = path.basename(src.file_name, ext);
-      let destPath = path.join(caseRow.folder_path, `${base}${ext}`);
+      let destPath = path.join(dir, `${base}${ext}`);
       let counter = 1;
       while (fs.existsSync(destPath)) {
-        destPath = path.join(caseRow.folder_path, `${base}_${counter}${ext}`);
+        destPath = path.join(dir, `${base}_${counter}${ext}`);
         counter++;
       }
       fs.copyFileSync(srcPath, destPath);

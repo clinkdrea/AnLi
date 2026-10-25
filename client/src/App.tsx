@@ -14,6 +14,9 @@ import AIAssistant from './pages/AIAssistant';
 import Knowledge from './pages/Knowledge';
 import Audit from './pages/Audit';
 import Users from './pages/Users';
+import BoardTemplates from './pages/BoardTemplates';
+import Settings from './pages/Settings';
+import Profile from './pages/Profile';
 
 export default function App() {
   const [user, setUser] = useState<any>(null);
@@ -40,6 +43,9 @@ export default function App() {
         <Route path="/knowledge" element={<Knowledge />} />
         <Route path="/audit" element={<Audit />} />
         <Route path="/users" element={<Users />} />
+        <Route path="/board-templates" element={<BoardTemplates />} />
+        <Route path="/settings" element={<Settings />} />
+        <Route path="/profile" element={<Profile />} />
         <Route path="*" element={<Navigate to="/" />} />
       </Routes>
     </Layout>

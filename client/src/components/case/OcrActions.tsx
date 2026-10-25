@@ -8,7 +8,7 @@ export function isImageFile(fileName: string): boolean {
   return IMAGE_EXTS.has('.' + ext);
 }
 
-// OCR 文本查看弹窗（文书资料 / 证据清单共用）
+// OCR 文本查看弹窗
 export function OcrTextModal({ fileName, text, onClose, onReOCR, reRunning }: {
   fileName: string;
   text: string;
@@ -71,7 +71,7 @@ interface OcrFile {
   ocr_text?: string | null;
 }
 
-// OCR 状态 + 操作（识别 / 重新识别 / 查看文本），文书资料与证据清单共用
+// OCR 状态 + 操作（识别 / 重新识别 / 查看文本）
 // size='cell' 用于表格单元格（带状态文字），'inline' 用于紧凑文件行（图标为主）
 export default function OcrActions({ file, onChanged, size = 'inline' }: {
   file: OcrFile;

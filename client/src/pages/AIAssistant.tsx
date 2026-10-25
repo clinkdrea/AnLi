@@ -342,7 +342,7 @@ export default function AIAssistant() {
               <div className="text-sm font-medium text-slate-500">律师专用 AI Agent</div>
               <div className="text-xs max-w-md">
                 {threadCaseId
-                  ? <>已挂载案件上下文（档案、当事人、案情记录、任务、文书资料与 OCR、证据清单）</>
+                  ? <>已挂载案件上下文（档案、当事人、案情记录、任务、文书资料与 OCR）</>
                   : '当前为通用模式，不携带案件数据；可在上方选择具体案件。'}
               </div>
               <div className="text-xs">

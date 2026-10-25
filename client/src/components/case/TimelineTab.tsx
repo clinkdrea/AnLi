@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { FileText, Flag, CheckCircle } from 'lucide-react';
+import { FileText, Flag, CheckCircle, PlusCircle } from 'lucide-react';
 
 export default function TimelineTab({ caseId }: { caseId: string }) {
   const [events, setEvents] = useState<any[]>([]);
@@ -13,6 +13,8 @@ export default function TimelineTab({ caseId }: { caseId: string }) {
     if (type === 'note') return <FileText className="w-4 h-4 text-blue-500" />;
     if (type === 'stage_start') return <Flag className="w-4 h-4 text-amber-500" />;
     if (type === 'stage_done') return <CheckCircle className="w-4 h-4 text-green-500" />;
+    if (type === 'task_create') return <PlusCircle className="w-4 h-4 text-violet-500" />;
+    if (type === 'task_done') return <CheckCircle className="w-4 h-4 text-emerald-600" />;
     return <CheckCircle className="w-4 h-4 text-slate-500" />;
   };
 

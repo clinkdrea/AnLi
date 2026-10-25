@@ -1,12 +1,27 @@
 import { useEffect, useState, useRef } from 'react';
-import { Plus, Trash2, Pencil, X, Check, GripVertical, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Plus, Trash2, Pencil, X, Check, GripVertical, ChevronLeft, ChevronRight, Circle, CircleCheck, Clock, AlertTriangle, HelpCircle, Search } from 'lucide-react';
 import { api } from '../../api';
+import AssigneeSelect, { isTaskOverdue } from './AssigneeSelect';
 
 const INPUT = 'border border-slate-300 rounded px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-amber-400';
 
-export default function BoardTab({ caseId }: { caseId: string }) {
+const STATUS_BADGE: Record<string, { text: string; cls: string }> = {
+  todo: { text: '待处理', cls: 'bg-slate-100 text-slate-500' },
+  doing: { text: '进行中', cls: 'bg-blue-100 text-blue-700' },
+  done: { text: '已完成', cls: 'bg-green-100 text-green-700' },
+  expired: { text: '已过期', cls: 'bg-red-100 text-red-600' },
+};
+const PRIORITY_BAR: Record<string, string> = { high: 'bg-red-400', medium: 'bg-amber-400', low: 'bg-slate-300' };
+
+function fmtDue(v?: string) {
+  if (!v) return '';
+  return v.includes('T') ? v.replace('T', ' ').slice(0, 16) : v;
+}
+
+export default function BoardTab({ caseId, onOpenTask }: { caseId: string; onOpenTask?: (taskId: number) => void }) {
   const [stages, setStages] = useState<any[]>([]);
-  const [notes, setNotes] = useState<any[]>([]);
+  const [tasks, setTasks] = useState<any[]>([]);
+  const [users, setUsers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
   // 表单/编辑状态
@@ -14,15 +29,23 @@ export default function BoardTab({ caseId }: { caseId: string }) {
   const [stageName, setStageName] = useState('');
   const [newStageName, setNewStageName] = useState('');
   const [showAddStage, setShowAddStage] = useState(false);
-  const [addingNote, setAddingNote] = useState<number | null>(null);
-  const [newNote, setNewNote] = useState('');
-  const [editingNote, setEditingNote] = useState<number | null>(null);
-  const [noteContent, setNoteContent] = useState('');
+  const [addingTask, setAddingTask] = useState<number | null | 'unassigned'>(null);
+  // 新建任务内联表单（仅标题、优先级、处理人；其余字段在任务详情中补充）
+  const [fTitle, setFTitle] = useState('');
+  const [fPriority, setFPriority] = useState('medium');
+  const [fAssignees, setFAssignees] = useState<number[]>([]);
+  // 任务内容搜索（标题 / 描述）
+  const [kw, setKw] = useState('');
+  // 筛选：负责人 / 状态 / 是否过期 / 截止时间范围
+  const [filterAssignee, setFilterAssignee] = useState<number | ''>('');
+  const [filterStatus, setFilterStatus] = useState<'' | 'todo' | 'doing' | 'done' | 'expired'>('');
+  const [filterOverdue, setFilterOverdue] = useState<'' | 'overdue' | 'not_overdue'>('');
+  const [filterTime, setFilterTime] = useState<'' | 'today' | '3d' | 'week' | 'month' | 'none'>('');
 
   // 拖拽状态：拖什么、悬停在哪、落点在哪
-  const [dragNoteId, setDragNoteId] = useState<number | null>(null);
+  const [dragTaskId, setDragTaskId] = useState<number | null>(null);
   const [dragStageId, setDragStageId] = useState<number | null>(null);
-  const [overStage, setOverStage] = useState<number | null | 'unassigned' | null>(null);
+  const [overStage, setOverStage] = useState<number | 'unassigned' | null>(null);
   const [overIndex, setOverIndex] = useState(0);
   const [overBeforeStage, setOverBeforeStage] = useState<number | 'end' | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -67,22 +90,70 @@ export default function BoardTab({ caseId }: { caseId: string }) {
       el.removeEventListener('scroll', updateArrows);
       window.removeEventListener('resize', updateArrows);
     };
-  }, [stages, notes]);
+  }, [stages, tasks]);
 
   const load = async () => {
     setLoading(true);
     try {
-      const [sd, nd] = await Promise.all([
+      const [sd, td, ud] = await Promise.all([
         api(`/cases/${caseId}/stages`),
-        api(`/cases/${caseId}/notes`),
+        api(`/cases/${caseId}/tasks?board=1&include_expired=1`),
+        api('/users/assignable').catch(() => ({ users: [] })),
       ]);
       setStages(sd.stages || []);
-      setNotes(nd.notes || []);
+      setTasks(td.tasks || []);
+      setUsers(ud.users || []);
     } catch {} finally { setLoading(false); }
   };
   useEffect(() => { load(); }, [caseId]);
 
-  const draggingAny = dragNoteId != null || dragStageId != null;
+  const draggingAny = dragTaskId != null || dragStageId != null;
+
+  // 搜索 + 筛选只影响展示，不影响拖拽排序所用的完整 tasks 数据
+  const kwTrim = kw.trim();
+  const hasFilter = filterAssignee !== '' || filterStatus !== '' || filterOverdue !== '' || filterTime !== '';
+  // 时间范围：返回 [下限, 上限]（含当天零点），'none' 单独处理
+  const timeRange = (() => {
+    if (!filterTime || filterTime === 'none') return null;
+    const d = new Date();
+    const dayStart = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    const end = new Date(dayStart);
+    if (filterTime === 'today') end.setDate(end.getDate() + 1);
+    else if (filterTime === '3d') end.setDate(end.getDate() + 3);
+    else if (filterTime === 'week') end.setDate(end.getDate() + (7 - ((d.getDay() + 6) % 7)) + 1); // 至下周一
+    else end.setMonth(end.getMonth() + 1, 1); // 至下月一号
+    return [dayStart, end] as const;
+  })();
+  const visibleTasks = tasks.filter((t) => {
+    if (kwTrim && !t.title.includes(kwTrim) && !(t.description || '').includes(kwTrim)) return false;
+    if (filterAssignee !== '' && !(t.assignees || []).some((a: any) => a.id === filterAssignee)) return false;
+    if (filterStatus !== '' && t.status !== filterStatus) return false;
+    if (filterOverdue === 'overdue' && !isTaskOverdue(t.status, t.due_date)) return false;
+    if (filterOverdue === 'not_overdue' && isTaskOverdue(t.status, t.due_date)) return false;
+    if (filterTime === 'none' && t.due_date) return false;
+    if (timeRange) {
+      if (!t.due_date) return false;
+      const due = new Date(t.due_date.replace(' ', 'T'));
+      if (isNaN(due.getTime())) return false;
+      if (due < timeRange[0] || due >= timeRange[1]) return false;
+    }
+    return true;
+  });
+  const clearFilters = () => { setFilterAssignee(''); setFilterStatus(''); setFilterOverdue(''); setFilterTime(''); };
+
+  // 标题中高亮第一处搜索匹配
+  const highlight = (text: string) => {
+    if (!kwTrim) return text;
+    const idx = text.indexOf(kwTrim);
+    if (idx < 0) return text;
+    return (
+      <>
+        {text.slice(0, idx)}
+        <mark className="bg-amber-200 text-amber-900 rounded px-0">{text.slice(idx, idx + kwTrim.length)}</mark>
+        {text.slice(idx + kwTrim.length)}
+      </>
+    );
+  };
 
   // ---------- 阶段 CRUD ----------
   const addStage = async () => {
@@ -96,37 +167,52 @@ export default function BoardTab({ caseId }: { caseId: string }) {
     setEditingStage(null); load();
   };
   const delStage = async (sid: number, name: string) => {
-    if (!confirm(`确认删除阶段「${name}」？该阶段下的记录将变为未分配。`)) return;
+    if (!confirm(`确认删除阶段「${name}」？该阶段下的任务将变为未分配。`)) return;
     await api(`/stages/${sid}`, { method: 'DELETE' }); load();
   };
 
-  // ---------- 记录 CRUD ----------
-  const addNote = async (sid: number | null) => {
-    if (!newNote.trim()) return;
-    await api(`/cases/${caseId}/notes`, { method: 'POST', body: JSON.stringify({ content: newNote, stage_id: sid }) });
-    setNewNote(''); setAddingNote(null); load();
+  // ---------- 任务 CRUD ----------
+  const openAddForm = (sid: number | null) => {
+    setAddingTask(sid == null ? 'unassigned' : sid);
+    setFTitle(''); setFPriority('medium'); setFAssignees([]);
   };
-  const updateNote = async (nid: number) => {
-    if (!noteContent.trim()) return;
-    await api(`/notes/${nid}`, { method: 'PUT', body: JSON.stringify({ content: noteContent }) });
-    setEditingNote(null); load();
+  const addTask = async (sid: number | null) => {
+    if (!fTitle.trim()) return;
+    const assigneeIds = fAssignees.length ? fAssignees : undefined;
+    const d = await api(`/cases/${caseId}/tasks`, {
+      method: 'POST',
+      body: JSON.stringify({
+        title: fTitle.trim(), priority: fPriority,
+        stage_id: sid, assignee_ids: assigneeIds,
+      }),
+    });
+    setAddingTask(null);
+    await load();
+    // 新建后直接打开任务二级页，便于补充详情
+    if (d?.id) onOpenTask?.(d.id);
   };
-  const delNote = async (nid: number, content: string) => {
-    if (!confirm(`确认删除记录「${content.slice(0, 20)}${content.length > 20 ? '...' : ''}」？`)) return;
-    await api(`/notes/${nid}`, { method: 'DELETE' }); load();
+  const toggleDone = async (e: React.MouseEvent, t: any) => {
+    e.stopPropagation();
+    await api(`/tasks/${t.id}`, { method: 'PUT', body: JSON.stringify({ status: t.status === 'done' ? 'todo' : 'done' }) });
+    load();
+  };
+  const delTask = async (e: React.MouseEvent, t: any) => {
+    e.stopPropagation();
+    if (!confirm(`确认删除任务「${t.title}」？`)) return;
+    await api(`/tasks/${t.id}`, { method: 'DELETE' }); load();
   };
 
   // ---------- 卡片拖拽 ----------
   const globalOrder = (a: any, b: any) => (a.sort_order ?? 0) - (b.sort_order ?? 0);
 
-  const doNoteDrop = (targetStage: number | null, targetIdx: number) => {
-    const nid = dragNoteId;
-    if (nid == null) return;
-    const dragged = notes.find(n => n.id === nid);
+  const doTaskDrop = (targetStage: number | null, targetIdx: number) => {
+    const tid = dragTaskId;
+    if (tid == null) return;
+    const dragged = tasks.find(n => n.id === tid);
     if (!dragged) return;
 
     // 按容器顺序重建全局排序：各阶段列（含未分配），目标容器在 targetIdx 插入被拖卡片
-    const others = notes.filter(n => n.id !== nid).sort(globalOrder);
+    const others = tasks.filter(n => n.id !== tid).sort(globalOrder);
     const containers: { sid: number | null; list: any[] }[] = [
       ...stages.map(s => ({ sid: s.id as number | null, list: others.filter(n => n.stage_id === s.id) })),
       { sid: null, list: others.filter(n => !n.stage_id) },
@@ -135,7 +221,7 @@ export default function BoardTab({ caseId }: { caseId: string }) {
     for (const c of containers) {
       const list = [...c.list];
       if ((c.sid ?? 'unassigned') === (targetStage ?? 'unassigned')) {
-        const orig = notes.find(n => n.id === nid);
+        const orig = tasks.find(n => n.id === tid);
         const moving = orig && orig.stage_id !== targetStage; // 跨列移动才允许任意落点
         const idx = moving ? targetIdx : Math.min(targetIdx, list.length);
         list.splice(idx, 0, dragged);
@@ -146,16 +232,16 @@ export default function BoardTab({ caseId }: { caseId: string }) {
     // 乐观更新
     const orderMap = new Map(items.map((it, i) => [it.id, i]));
     const stageMap = new Map(items.map(it => [it.id, it.stage_id]));
-    setNotes(prev => prev.map(n => ({ ...n, sort_order: orderMap.get(n.id) ?? n.sort_order, stage_id: stageMap.get(n.id) ?? n.stage_id })));
-    api(`/cases/${caseId}/notes/reorder`, { method: 'PUT', body: JSON.stringify({ items }) })
+    setTasks(prev => prev.map(n => ({ ...n, sort_order: orderMap.get(n.id) ?? n.sort_order, stage_id: stageMap.get(n.id) ?? n.stage_id })));
+    api(`/cases/${caseId}/tasks/reorder`, { method: 'PUT', body: JSON.stringify({ items }) })
       .catch(() => load());
-    setDragNoteId(null); setOverStage(null); setOverIndex(0);
+    setDragTaskId(null); setOverStage(null); setOverIndex(0);
   };
 
-  const computeInsertIndex = (e: React.DragEvent, colNotes: any[]) => {
+  const computeInsertIndex = (e: React.DragEvent, colTasks: any[]) => {
     let idx = 0;
-    for (const n of colNotes) {
-      const el = document.getElementById(`note-${n.id}`);
+    for (const n of colTasks) {
+      const el = document.getElementById(`task-${n.id}`);
       if (!el) continue;
       const r = el.getBoundingClientRect();
       if (e.clientY > r.top + r.height / 2) idx++;
@@ -163,17 +249,17 @@ export default function BoardTab({ caseId }: { caseId: string }) {
     return idx;
   };
 
-  const onNoteDragStart = (e: React.DragEvent, nid: number) => {
-    setDragNoteId(nid);
+  const onTaskDragStart = (e: React.DragEvent, tid: number) => {
+    setDragTaskId(tid);
     e.dataTransfer.effectAllowed = 'move';
-    e.dataTransfer.setData('text/plain', String(nid));
+    e.dataTransfer.setData('text/plain', String(tid));
   };
-  const onColumnDragOver = (e: React.DragEvent, sid: number | null, colNotes: any[]) => {
-    if (dragNoteId == null) return;
+  const onColumnDragOver = (e: React.DragEvent, sid: number | null, colTasks: any[]) => {
+    if (dragTaskId == null) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
     setOverStage(sid ?? 'unassigned');
-    setOverIndex(computeInsertIndex(e, colNotes.filter(n => n.id !== dragNoteId)));
+    setOverIndex(computeInsertIndex(e, colTasks.filter(n => n.id !== dragTaskId)));
   };
   const onColumnDragLeave = (e: React.DragEvent) => {
     if (!e.currentTarget.contains(e.relatedTarget as Node)) {
@@ -181,7 +267,7 @@ export default function BoardTab({ caseId }: { caseId: string }) {
     }
   };
   const onDragEnd = () => {
-    setDragNoteId(null); setDragStageId(null); setOverStage(null); setOverIndex(0); setOverBeforeStage(null);
+    setDragTaskId(null); setDragStageId(null); setOverStage(null); setOverIndex(0); setOverBeforeStage(null);
   };
 
   // ---------- 阶段列拖拽（手柄触发） ----------
@@ -241,75 +327,108 @@ export default function BoardTab({ caseId }: { caseId: string }) {
     </div>
   );
 
-  const renderNoteCard = (n: any) => {
-    const isDragging = dragNoteId === n.id;
-    if (editingNote === n.id) {
-      return (
-        <div key={n.id} className="bg-white rounded shadow-sm p-2.5 border border-amber-300">
-          <textarea value={noteContent} onChange={(e) => setNoteContent(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) updateNote(n.id); }}
-            rows={3} className={`${INPUT} w-full mb-2`} autoFocus />
-          <div className="flex gap-1 justify-end items-center">
-            <span className="text-xs text-slate-400 mr-auto">⌘/Ctrl+Enter 保存</span>
-            <button onClick={() => updateNote(n.id)} className="text-green-600"><Check className="w-4 h-4" /></button>
-            <button onClick={() => setEditingNote(null)} className="text-slate-400"><X className="w-4 h-4" /></button>
-          </div>
-        </div>
-      );
-    }
+  const assigneeText = (t: any) => {
+    const list: any[] = t.assignees || [];
+    if (list.length === 0) return '未指派';
+    if (list.length === 1) return list[0].name;
+    return `${list[0].name} 等${list.length}人`;
+  };
+
+  const renderTaskCard = (t: any) => {
+    const isDragging = dragTaskId === t.id;
+    const done = t.status === 'done';
+    const overdue = isTaskOverdue(t.status, t.due_date);
+    const badge = STATUS_BADGE[t.status] || STATUS_BADGE.todo;
     return (
-      <div key={n.id} id={`note-${n.id}`}
+      <div key={t.id} id={`task-${t.id}`}
         draggable
-        onDragStart={(e) => onNoteDragStart(e, n.id)}
+        onDragStart={(e) => onTaskDragStart(e, t.id)}
         onDragEnd={onDragEnd}
-        onDoubleClick={() => { setEditingNote(n.id); setNoteContent(n.content); }}
-        className={`bg-white rounded shadow-sm p-2.5 text-sm cursor-grab active:cursor-grabbing hover:shadow-md group transition-all
+        onClick={() => onOpenTask?.(t.id)}
+        className={`relative bg-white rounded shadow-sm pl-3 pr-2.5 py-2 text-sm cursor-pointer hover:shadow-md group transition-all overflow-hidden
           ${isDragging ? 'opacity-30 scale-95 rotate-1' : 'hover:-translate-y-0.5'}`}>
-        <div className="whitespace-pre-wrap break-words pointer-events-none">{n.content}</div>
-        <div className={`flex justify-between items-center mt-1.5 pt-1.5 border-t border-slate-100 transition ${isDragging ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
-          <span className="text-xs text-slate-400 select-none">{n.author_name} · {n.created_at?.slice(5, 10)}</span>
-          <button onClick={() => delNote(n.id, n.content)} className="text-slate-400 hover:text-red-600"><Trash2 className="w-3.5 h-3.5" /></button>
+        <span className={`absolute left-0 top-0 bottom-0 w-1 ${PRIORITY_BAR[t.priority] || PRIORITY_BAR.medium}`} />
+        <div className={`break-words pr-1 ${done ? 'line-through text-slate-400' : ''}`}>{highlight(t.title)}</div>
+        <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
+          {overdue && t.status !== 'expired' ? (
+            <span className="flex items-center gap-0.5 text-[10px] px-1.5 py-px rounded-full bg-red-100 text-red-600 font-medium">
+              <AlertTriangle className="w-2.5 h-2.5" />已过期
+            </span>
+          ) : (
+            <span className={`text-[10px] px-1.5 py-px rounded-full ${badge.cls}`}>{badge.text}</span>
+          )}
+          {t.due_date && (
+            <span className={`flex items-center gap-0.5 text-[11px] ${overdue ? 'text-red-500 font-medium' : 'text-slate-400'}`}>
+              <Clock className="w-3 h-3" />{fmtDue(t.due_date)}
+            </span>
+          )}
+        </div>
+        <div className={`flex justify-between items-center mt-1 pt-1 border-t border-slate-100 transition ${isDragging ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
+          <span className="text-[11px] text-slate-400 truncate">{assigneeText(t)}</span>
+          <span className="flex items-center gap-1 shrink-0">
+            <button onClick={(e) => toggleDone(e, t)} title={done ? '标记为未完成' : '标记完成'}
+              className={done ? 'text-green-500 hover:text-green-600' : 'text-slate-300 hover:text-green-500'}>
+              {done ? <CircleCheck className="w-4 h-4" /> : <Circle className="w-4 h-4" />}
+            </button>
+            <button onClick={(e) => delTask(e, t)} className="text-slate-400 hover:text-red-600">
+              <Trash2 className="w-3.5 h-3.5" />
+            </button>
+          </span>
         </div>
       </div>
     );
   };
 
   const renderColumnBody = (sid: number | null) => {
-    const colNotes = notes.filter(n => (sid == null ? !n.stage_id : n.stage_id === sid)).sort(globalOrder);
-    const isOver = overStage === (sid ?? 'unassigned') && dragNoteId != null;
+    const key = sid == null ? 'unassigned' : sid;
+    const colTasks = visibleTasks.filter(n => (sid == null ? !n.stage_id : n.stage_id === sid)).sort(globalOrder);
+    const isOver = overStage === key && dragTaskId != null;
     const display: any[] = [];
-    const insertAt = isOver ? Math.min(overIndex, colNotes.length) : -1;
-    colNotes.forEach((n, i) => {
-      if (i === insertAt) display.push({ ph: true, key: `ph-${sid}` });
+    const insertAt = isOver ? Math.min(overIndex, colTasks.length) : -1;
+    colTasks.forEach((n, i) => {
+      if (i === insertAt) display.push({ ph: true, key: `ph-${key}` });
       display.push(n);
     });
-    if (isOver && (insertAt >= colNotes.length || colNotes.length === 0)) display.push({ ph: true, key: `ph-${sid}` });
+    if (isOver && (insertAt >= colTasks.length || colTasks.length === 0)) display.push({ ph: true, key: `ph-${key}` });
 
     return (
       <div
-        onDragOver={(e) => onColumnDragOver(e, sid, colNotes)}
+        onDragOver={(e) => onColumnDragOver(e, sid, colTasks)}
         onDragLeave={onColumnDragLeave}
-        onDrop={(e) => { e.preventDefault(); doNoteDrop(sid, overIndex); }}
+        onDrop={(e) => { e.preventDefault(); doTaskDrop(sid, overIndex); }}
         className={`p-2 space-y-2 flex-1 overflow-y-auto min-h-[70px] transition-colors rounded-b
           ${isOver ? 'bg-amber-50/60 ring-1 ring-inset ring-amber-200' : ''}`}>
         {display.map((it: any) =>
-          it.ph ? <div key={it.key}>{renderPlaceholder()}</div> : renderNoteCard(it)
+          it.ph ? <div key={it.key}>{renderPlaceholder()}</div> : renderTaskCard(it)
         )}
-        {addingNote === sid ? (
-          <div className="bg-white rounded shadow-sm p-2 ring-1 ring-amber-300">
-            <textarea value={newNote} onChange={(e) => setNewNote(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) addNote(sid); }}
-              rows={2} placeholder="记录案情..." className={`${INPUT} w-full mb-2`} autoFocus />
-            <div className="flex gap-1 justify-end items-center">
-              <span className="text-xs text-slate-400 mr-auto">⌘/Ctrl+Enter</span>
-              <button onClick={() => addNote(sid)} className="bg-amber-500 text-white px-2 py-1 rounded text-xs">添加</button>
-              <button onClick={() => { setAddingNote(null); setNewNote(''); }} className="text-slate-400 px-2 py-1"><X className="w-3.5 h-3.5" /></button>
+        {(kwTrim || hasFilter) && colTasks.length === 0 && addingTask !== key && (
+          <p className="text-center text-[11px] text-slate-300 py-3 select-none">无匹配任务</p>
+        )}
+        {addingTask === key ? (
+          <div className="bg-white rounded shadow-sm p-2.5 ring-1 ring-amber-300" onClick={(e) => e.stopPropagation()}>
+            <input value={fTitle} onChange={(e) => setFTitle(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') addTask(sid); }}
+              placeholder="任务标题" className={`${INPUT} w-full mb-2`} autoFocus />
+            <div className="flex gap-2 mb-2">
+              <select value={fPriority} onChange={(e) => setFPriority(e.target.value)}
+                className={`${INPUT} flex-1 text-xs`}>
+                <option value="high">优先级：高</option>
+                <option value="medium">优先级：中</option>
+                <option value="low">优先级：低</option>
+              </select>
+            </div>
+            <AssigneeSelect users={users} value={fAssignees} onChange={setFAssignees}
+              placeholder="处理人（不选默认自己）" />
+            <div className="flex gap-1 justify-end items-center mt-2">
+              <span className="text-[11px] text-slate-400 mr-auto">Enter 创建 · 时间等详情可在创建后补充</span>
+              <button onClick={() => addTask(sid)} className="bg-amber-500 text-white px-2 py-1 rounded text-xs">添加</button>
+              <button onClick={() => setAddingTask(null)} className="text-slate-400 px-2 py-1"><X className="w-3.5 h-3.5" /></button>
             </div>
           </div>
         ) : (
-          <button onClick={() => { setAddingNote(sid); setNewNote(''); }}
+          <button onClick={(e) => { e.stopPropagation(); openAddForm(sid); }}
             className="w-full text-xs text-slate-400 hover:text-amber-600 hover:bg-white rounded py-1.5 flex items-center justify-center gap-1 transition">
-            <Plus className="w-3.5 h-3.5" /> 添加记录
+            <Plus className="w-3.5 h-3.5" /> 添加任务
           </button>
         )}
       </div>
@@ -320,18 +439,94 @@ export default function BoardTab({ caseId }: { caseId: string }) {
 
   return (
     <div className="flex flex-col h-[calc(100vh_-_14rem)]">
-      <div className="flex items-center justify-between mb-3">
-        <p className="text-sm text-slate-500 select-none">
-          {draggingAny ? (
-            dragNoteId != null
-              ? <span className="text-amber-600 font-medium">正在拖动记录 — 悬停到目标阶段后松开</span>
-              : <span className="text-amber-600 font-medium">正在拖动阶段 — 移到目标位置竖线处松开</span>
-          ) : (
-            <>拖 <GripVertical className="w-3.5 h-3.5 inline -mt-0.5" /> 手柄调整阶段顺序 · 拖拽卡片跨阶段移动 · 双击卡片编辑</>
+      <div className="flex items-center gap-2.5 mb-3">
+        {/* 操作帮助：hover / 聚焦显示分点说明 */}
+        <div className="relative group shrink-0">
+          <HelpCircle tabIndex={0}
+            className="w-[18px] h-[18px] text-slate-400 hover:text-amber-600 cursor-help outline-none" />
+          <div className="absolute left-0 top-6 z-40 w-72 hidden group-hover:block group-focus-within:block bg-white border border-slate-200 rounded-lg shadow-lg p-3 text-xs text-slate-600">
+            <p className="font-medium text-slate-800 mb-2">看板操作说明</p>
+            <ul className="space-y-2">
+              <li className="flex items-start gap-2">
+                <GripVertical className="w-3.5 h-3.5 mt-0.5 text-amber-500 shrink-0" />
+                拖动阶段标题栏的手柄，可左右调整阶段顺序
+              </li>
+              <li className="flex items-start gap-2">
+                <span className="w-3.5 h-3.5 mt-0.5 shrink-0 rounded-sm border border-slate-300" />
+                直接拖拽任务卡片，可在各阶段之间移动任务
+              </li>
+              <li className="flex items-start gap-2">
+                <Check className="w-3.5 h-3.5 mt-0.5 text-emerald-500 shrink-0" />
+                点击任务卡片，可查看与编辑任务详情
+              </li>
+            </ul>
+          </div>
+        </div>
+
+        {/* 任务内容搜索 */}
+        <div className="relative">
+          <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+          <input value={kw} onChange={(e) => setKw(e.target.value)}
+            placeholder="搜索任务标题或描述"
+            className="w-60 border border-slate-300 rounded py-1.5 pl-8 pr-7 text-sm focus:outline-none focus:ring-1 focus:ring-amber-400" />
+          {kwTrim && (
+            <button onClick={() => setKw('')} title="清除搜索"
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
+              <X className="w-3.5 h-3.5" />
+            </button>
           )}
-        </p>
+        </div>
+        {/* 筛选：负责人 / 状态 / 是否过期 */}
+        <div className="flex items-center gap-1.5 shrink-0">
+          <select value={filterAssignee}
+            onChange={(e) => setFilterAssignee(e.target.value ? Number(e.target.value) : '')}
+            title="按负责人筛选"
+            className={`border rounded px-1.5 py-1.5 text-xs focus:outline-none focus:border-amber-400 ${filterAssignee !== '' ? 'border-amber-400 bg-amber-50 text-amber-700' : 'border-slate-300 text-slate-600'}`}>
+            <option value="">全部负责人</option>
+            {users.map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+          </select>
+          <select value={filterStatus}
+            onChange={(e) => setFilterStatus(e.target.value as any)}
+            title="按状态筛选"
+            className={`border rounded px-1.5 py-1.5 text-xs focus:outline-none focus:border-amber-400 ${filterStatus !== '' ? 'border-amber-400 bg-amber-50 text-amber-700' : 'border-slate-300 text-slate-600'}`}>
+            <option value="">全部状态</option>
+            <option value="todo">待处理</option>
+            <option value="doing">进行中</option>
+            <option value="done">已完成</option>
+            <option value="expired">已过期</option>
+          </select>
+          <select value={filterOverdue}
+            onChange={(e) => setFilterOverdue(e.target.value as any)}
+            title="按是否过期筛选"
+            className={`border rounded px-1.5 py-1.5 text-xs focus:outline-none focus:border-amber-400 ${filterOverdue !== '' ? 'border-amber-400 bg-amber-50 text-amber-700' : 'border-slate-300 text-slate-600'}`}>
+            <option value="">全部期限</option>
+            <option value="overdue">已过期</option>
+            <option value="not_overdue">未过期</option>
+          </select>
+          <select value={filterTime}
+            onChange={(e) => setFilterTime(e.target.value as any)}
+            title="按截止时间筛选"
+            className={`border rounded px-1.5 py-1.5 text-xs focus:outline-none focus:border-amber-400 ${filterTime !== '' ? 'border-amber-400 bg-amber-50 text-amber-700' : 'border-slate-300 text-slate-600'}`}>
+            <option value="">全部时间</option>
+            <option value="today">今天到期</option>
+            <option value="3d">3 天内到期</option>
+            <option value="week">本周到期</option>
+            <option value="month">本月到期</option>
+            <option value="none">无截止时间</option>
+          </select>
+          {hasFilter && (
+            <button onClick={clearFilters} title="清除全部筛选"
+              className="text-slate-400 hover:text-slate-600 p-1">
+              <X className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+        {(kwTrim || hasFilter) && (
+          <span className="text-xs text-slate-400 shrink-0">{visibleTasks.length} 个匹配任务</span>
+        )}
+
         <button onClick={() => setShowAddStage(s => !s)}
-          className="flex items-center gap-1 bg-amber-500 hover:bg-amber-600 text-white px-3 py-1.5 rounded text-sm">
+          className="ml-auto flex items-center gap-1 bg-amber-500 hover:bg-amber-600 text-white px-3 py-1.5 rounded text-sm shrink-0">
           <Plus className="w-4 h-4" /> 新增阶段
         </button>
       </div>
@@ -365,7 +560,7 @@ export default function BoardTab({ caseId }: { caseId: string }) {
         {stages.map((s) => {
           const isDragged = dragStageId === s.id;
           const showBar = dragStageId != null && overBeforeStage === s.id;
-          const sNotes = notes.filter(n => n.stage_id === s.id);
+          const sTasks = visibleTasks.filter(n => n.stage_id === s.id);
           return (
             <div key={s.id} className="flex items-stretch shrink-0">
               {showBar && <div className="w-1 rounded-full bg-amber-400 mr-1 animate-pulse" />}
@@ -395,9 +590,9 @@ export default function BoardTab({ caseId }: { caseId: string }) {
                   ) : (
                     <>
                       <span className="font-medium text-sm flex-1 truncate select-none">{s.name}</span>
-                      <span className={`text-xs rounded-full px-2 py-0.5 transition ${overStage === s.id && dragNoteId != null ? 'bg-amber-200 text-amber-700' : 'text-slate-400 bg-slate-200'}`}>{sNotes.length}</span>
-                      <button onClick={() => { setEditingStage(s.id); setStageName(s.name); }} className="text-slate-400 hover:text-amber-600"><Pencil className="w-3.5 h-3.5" /></button>
-                      <button onClick={() => delStage(s.id, s.name)} className="text-slate-400 hover:text-red-600"><Trash2 className="w-3.5 h-3.5" /></button>
+                      <span className={`text-xs rounded-full px-2 py-0.5 transition ${overStage === s.id && dragTaskId != null ? 'bg-amber-200 text-amber-700' : 'text-slate-400 bg-slate-200'}`}>{sTasks.length}</span>
+                      <button onClick={(e) => { e.stopPropagation(); setEditingStage(s.id); setStageName(s.name); }} className="text-slate-400 hover:text-amber-600"><Pencil className="w-3.5 h-3.5" /></button>
+                      <button onClick={(e) => { e.stopPropagation(); delStage(s.id, s.name); }} className="text-slate-400 hover:text-red-600"><Trash2 className="w-3.5 h-3.5" /></button>
                     </>
                   )}
                 </div>
@@ -410,10 +605,10 @@ export default function BoardTab({ caseId }: { caseId: string }) {
         {dragStageId != null && overBeforeStage === 'end' && <div className="w-1 rounded-full bg-amber-400 animate-pulse" />}
 
         {/* 未分配列 */}
-        <div onDragOver={(e) => { if (dragNoteId != null) { e.preventDefault(); setOverStage('unassigned'); } }}
-          onDrop={(e) => { if (dragNoteId != null) { e.preventDefault(); doNoteDrop(null, overStage === 'unassigned' ? overIndex : 0); } }}
+        <div onDragOver={(e) => { if (dragTaskId != null) { e.preventDefault(); setOverStage('unassigned'); } }}
+          onDrop={(e) => { if (dragTaskId != null) { e.preventDefault(); doTaskDrop(null, overStage === 'unassigned' ? overIndex : 0); } }}
           className={`bg-slate-50 border-2 border-dashed rounded w-72 shrink-0 flex flex-col transition-colors
-            ${overStage === 'unassigned' && dragNoteId != null ? 'border-amber-400 bg-amber-50/60' : 'border-slate-300'}`}>
+            ${overStage === 'unassigned' && dragTaskId != null ? 'border-amber-400 bg-amber-50/60' : 'border-slate-300'}`}>
           <div data-stage-header className="p-2.5 border-b border-slate-200 text-sm text-slate-500 select-none">未分配</div>
           {renderColumnBody(null)}
         </div>

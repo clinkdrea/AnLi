@@ -4,9 +4,46 @@ import { isCaseMember } from '../plugins/auth.js';
 import { logAudit } from '../services/audit.js';
 import { buildTaskIcs, buildTasksIcs, safeIcsName } from '../services/ics.js';
 
+// 为任务列表附加多选处理人
+function withAssignees(tasks: any[]) {
+  if (!tasks.length) return tasks;
+  const ids = tasks.map((t) => t.id);
+  const ph = ids.map(() => '?').join(',');
+  const rows = db.prepare(
+    `SELECT ta.task_id, u.id as user_id, u.name as user_name
+     FROM task_assignees ta JOIN users u ON ta.user_id = u.id
+     WHERE ta.task_id IN (${ph}) ORDER BY u.id`
+  ).all(...ids) as any[];
+  const map = new Map<number, any[]>();
+  for (const r of rows) {
+    if (!map.has(r.task_id)) map.set(r.task_id, []);
+    map.get(r.task_id)!.push({ id: r.user_id, name: r.user_name });
+  }
+  for (const t of tasks) t.assignees = map.get(t.id) || [];
+  return tasks;
+}
+
+// 当前用户是否为任务处理人
+function isAssignee(tid: number, uid: number): boolean {
+  return !!(db.prepare('SELECT 1 FROM task_assignees WHERE task_id = ? AND user_id = ?').get(tid, uid));
+}
+
+// 规整处理人列表：去重、必须为在职用户
+function resolveAssigneeIds(raw: any, fallbackUid: number): number[] {
+  let ids = Array.isArray(raw)
+    ? raw.map((x) => Number(x)).filter((n) => Number.isFinite(n) && n > 0)
+    : [];
+  ids = [...new Set(ids)];
+  const valid = ids.filter((id) =>
+    (db.prepare("SELECT 1 FROM users WHERE id = ? AND status = 'active'").get(id))
+  );
+  if (valid.length === 0) return [fallbackUid];
+  return valid;
+}
+
 export default async function taskRoutes(app: FastifyInstance) {
-  // 案件任务列表
-  // query: sort=due|created, order=asc|desc, include_expired=1（默认隐藏 expired）
+  // 案件任务列表（即案件待办）
+  // query: sort=due|created|order, order=asc|desc, include_expired=1, board=1（看板模式按 sort_order）
   app.get('/api/cases/:id/tasks', async (req, reply) => {
     const cid = Number((req.params as any).id);
     if (req.user!.role !== 'admin' && !isCaseMember(req.user!.id, cid)) {
@@ -21,44 +58,63 @@ export default async function taskRoutes(app: FastifyInstance) {
     ).run(cid);
 
     const q = req.query as any;
-    const sort = q.sort === 'created' ? 'created_at' : 'due_date';
-    const order = q.order === 'asc' ? 'ASC' : 'DESC';
     const includeExpired = q.include_expired === '1';
-    // 默认只显示 todo + done（隐藏 expired）；include_expired=1 显示全部
     const statusFilter = includeExpired ? '' : " AND t.status != 'expired'";
-    // 单案件任务软上限 500 条，避免极端情况下一次性加载过多
+    let orderSql = 't.created_at DESC';
+    if (q.board === '1') orderSql = 't.sort_order, t.id';
+    else {
+      const sort = q.sort === 'created' ? 'created_at' : 'due_date';
+      const order = q.order === 'asc' ? 'ASC' : 'DESC';
+      orderSql = sort === 'due_date' ? `(t.due_date IS NULL), t.due_date ${order}` : `t.created_at ${order}`;
+    }
+    // 单案件任务软上限 500 条
     const tasks = db.prepare(
-      `SELECT t.*, u.name as assignee_name, s.name as stage_name
+      `SELECT t.*, s.name as stage_name
        FROM tasks t
-       LEFT JOIN users u ON t.assignee_id = u.id
        LEFT JOIN case_stages s ON t.stage_id = s.id
        WHERE t.case_id = ?${statusFilter}
-       ORDER BY ${(sort === 'due_date' ? '(t.due_date IS NULL), t.due_date' : 't.created_at')} ${order}
+       ORDER BY ${orderSql}
        LIMIT 500`
     ).all(cid);
-    return { tasks };
+    return { tasks: withAssignees(tasks as any[]) };
   });
 
-  // 创建任务
+  // 创建任务（看板/待办共用）：支持多处理人、开始/截止时间、阶段、状态、优先级
   app.post('/api/cases/:id/tasks', async (req, reply) => {
     const cid = Number((req.params as any).id);
     if (req.user!.role !== 'admin' && !isCaseMember(req.user!.id, cid)) {
       return reply.status(403).send({ error: '无权访问' });
     }
-    const { title, description, assignee_id, due_date, priority, stage_id } = req.body as any;
-    if (!title?.trim()) return reply.status(400).send({ error: '任务标题必填' });
-    // 未指定负责人时默认分配给当前操作用户，确保任务出现在其"我的待办"
-    const finalAssignee = assignee_id || req.user!.id;
+    const b = req.body as any;
+    if (!b.title?.trim()) return reply.status(400).send({ error: '任务标题必填' });
+    const assigneeIds = resolveAssigneeIds(b.assignee_ids ?? b.assignee_id, req.user!.id);
+    const status = ['todo', 'doing', 'done'].includes(b.status) ? b.status : 'todo';
+    const priority = ['high', 'medium', 'low'].includes(b.priority) ? b.priority : 'medium';
+    // 排到所在阶段（或未分配）末尾
+    const stageId = b.stage_id || null;
+    const maxRow = db.prepare(
+      'SELECT MAX(sort_order) as m FROM tasks WHERE case_id = ? AND COALESCE(stage_id, 0) = COALESCE(?, 0)'
+    ).get(cid, stageId) as any;
+
     const info = db.prepare(
-      `INSERT INTO tasks (case_id, stage_id, title, description, assignee_id, due_date, priority)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).run(cid, stage_id || null, title.trim(), description || null, finalAssignee, due_date || null, priority || 'medium');
+      `INSERT INTO tasks (case_id, stage_id, title, description, assignee_id, start_date, due_date, sort_order, priority, status, completed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      cid, stageId, b.title.trim(), b.description?.trim() || null,
+      assigneeIds[0], b.start_date || null, b.due_date || null,
+      (maxRow?.m ?? -1) + 1, priority, status, status === 'done' ? new Date().toISOString().replace('T', ' ').slice(0, 19) : null
+    );
     const tid = Number(info.lastInsertRowid);
-    logAudit(req.user!.id, 'task_create', 'task', tid, title);
-    // 通知负责人（仅当负责人不是创建者本人）
-    if (assignee_id && assignee_id !== req.user!.id) {
-      db.prepare('INSERT INTO notifications (user_id, type, content) VALUES (?, ?, ?)')
-        .run(assignee_id, 'task', `您被分配了新任务：${title}`);
+    const insTA = db.prepare('INSERT OR IGNORE INTO task_assignees (task_id, user_id) VALUES (?, ?)');
+    for (const uid of assigneeIds) insTA.run(tid, uid);
+
+    logAudit(req.user!.id, 'task_create', 'task', tid, b.title.trim());
+    // 通知被分配的处理人（除创建者）
+    for (const uid of assigneeIds) {
+      if (uid !== req.user!.id) {
+        db.prepare('INSERT INTO notifications (user_id, type, content) VALUES (?, ?, ?)')
+          .run(uid, 'task', `您被分配了新任务：${b.title.trim()}`);
+      }
     }
     return reply.status(201).send({ id: tid });
   });
@@ -72,31 +128,25 @@ export default async function taskRoutes(app: FastifyInstance) {
        VALUES (NULL, ?, ?, ?, ?)`
     ).run(title.trim(), req.user!.id, due_date || null, priority || 'medium');
     const tid = Number(info.lastInsertRowid);
+    db.prepare('INSERT INTO task_assignees (task_id, user_id) VALUES (?, ?)').run(tid, req.user!.id);
     logAudit(req.user!.id, 'task_create', 'task', tid, title.trim());
     return reply.status(201).send({ id: tid });
   });
 
-  // 待办中心：全量查询当前用户的任务，支持筛选与排序
-  // query:
-  //   status=todo|expired|done|all（默认 all）
-  //   case_id=N（按案件筛选）
-  //   from=YYYY-MM-DD, to=YYYY-MM-DD（按截止时间范围筛选）
-  //   q=关键词（标题模糊）
-  //   sort=due|created（默认 due）
-  //   order=asc|desc（默认 asc for due, desc for created）
-  //   page（1-based，默认 1）、pageSize（默认 20，最大 100）
+  // 待办中心：当前用户作为处理人的全部任务（多选处理人通过 task_assignees 关联）
   app.get('/api/todos', async (req) => {
     const uid = req.user!.id;
     // 懒执行：先自动关闭过期任务
     db.prepare(
       `UPDATE tasks SET status = 'expired'
-       WHERE assignee_id = ? AND status = 'todo'
+       WHERE status = 'todo'
          AND due_date IS NOT NULL AND due_date != ''
-         AND due_date < datetime('now')`
+         AND due_date < datetime('now')
+         AND id IN (SELECT task_id FROM task_assignees WHERE user_id = ?)`
     ).run(uid);
 
     const q = req.query as any;
-    const where = ['t.assignee_id = ?'];
+    const where = ['EXISTS (SELECT 1 FROM task_assignees ta WHERE ta.task_id = t.id AND ta.user_id = ?)'];
     const params: any[] = [uid];
 
     const status = q.status || 'all';
@@ -142,43 +192,119 @@ export default async function taskRoutes(app: FastifyInstance) {
        ORDER BY ${orderExpr} ${order}
        LIMIT ? OFFSET ?`
     ).all(...params, pageSize, offset);
-    return { tasks, total, page, pageSize };
+    return { tasks: withAssignees(tasks as any[]), total, page, pageSize };
   });
 
-  // 更新任务状态（个人待办仅本人/管理员；案件任务限案件成员或管理员）
+  // 任务详情（二级页面）
+  app.get('/api/tasks/:tid/detail', async (req, reply) => {
+    const tid = Number((req.params as any).tid);
+    const task = db.prepare(
+      `SELECT t.*, s.name as stage_name, c.name as case_name
+       FROM tasks t
+       LEFT JOIN case_stages s ON t.stage_id = s.id
+       LEFT JOIN cases c ON t.case_id = c.id
+       WHERE t.id = ?`
+    ).get(tid) as any;
+    if (!task) return reply.status(404).send({ error: '任务不存在' });
+    if (task.case_id && req.user!.role !== 'admin' && !isCaseMember(req.user!.id, task.case_id)) {
+      return reply.status(403).send({ error: '无权访问该任务' });
+    }
+    withAssignees([task]);
+    return { task };
+  });
+
+  // 更新任务（全字段；个人待办仅本人/管理员；案件任务限案件成员或管理员）
   app.put('/api/tasks/:tid', async (req, reply) => {
     const tid = Number((req.params as any).tid);
     const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(tid) as any;
     if (!task) return reply.status(404).send({ error: '任务不存在' });
     const uid = req.user!.id;
-    const caseRow = task.case_id
-      ? db.prepare('SELECT lead_id FROM cases WHERE id = ?').get(task.case_id) as any
-      : null;
     const allowed = req.user!.role === 'admin'
-      || task.assignee_id === uid
-      || (!!task.case_id && (isCaseMember(uid, task.case_id) || caseRow?.lead_id === uid));
+      || isAssignee(tid, uid)
+      || (!!task.case_id && isCaseMember(uid, task.case_id));
     if (!allowed) return reply.status(403).send({ error: '无权操作该任务' });
-    const { status, title, due_date } = req.body as any;
+
+    const b = req.body as any;
     const fields: string[] = [];
     const params: any[] = [];
-    if (status) { fields.push('status = ?'); params.push(status); }
-    if (title) { fields.push('title = ?'); params.push(title); }
-    if (due_date !== undefined) { fields.push('due_date = ?'); params.push(due_date); }
+    const set = (col: string, val: any) => { fields.push(`${col} = ?`); params.push(val); };
+
+    if (b.title !== undefined) {
+      if (!String(b.title).trim()) return reply.status(400).send({ error: '任务标题必填' });
+      set('title', String(b.title).trim());
+    }
+    if (b.description !== undefined) set('description', b.description?.trim() || null);
+    if (b.due_date !== undefined) set('due_date', b.due_date || null);
+    if (b.start_date !== undefined) set('start_date', b.start_date || null);
+    if (b.priority !== undefined) {
+      if (!['high', 'medium', 'low'].includes(b.priority)) return reply.status(400).send({ error: '优先级非法' });
+      set('priority', b.priority);
+    }
+    if (b.stage_id !== undefined) set('stage_id', b.stage_id || null);
+    if (b.status !== undefined) {
+      if (!['todo', 'doing', 'done', 'expired'].includes(b.status)) {
+        return reply.status(400).send({ error: '状态非法' });
+      }
+      set('status', b.status);
+      // 完成记录完成时间；从完成态改回则清空（datetime('now') 为固定表达式，直接内联）
+      if (b.status === 'done') {
+        fields.push("completed_at = datetime('now')");
+      } else if (task.status === 'done') {
+        fields.push('completed_at = NULL');
+      }
+    }
     if (fields.length) {
       params.push(tid);
       db.prepare(`UPDATE tasks SET ${fields.join(', ')} WHERE id = ?`).run(...params);
     }
+
+    // 处理人多选更新
+    if (Array.isArray(b.assignee_ids)) {
+      const ids = resolveAssigneeIds(b.assignee_ids, uid);
+      db.prepare('DELETE FROM task_assignees WHERE task_id = ?').run(tid);
+      const insTA = db.prepare('INSERT OR IGNORE INTO task_assignees (task_id, user_id) VALUES (?, ?)');
+      for (const x of ids) insTA.run(tid, x);
+      // assignee_id 冗余为首位处理人
+      db.prepare('UPDATE tasks SET assignee_id = ? WHERE id = ?').run(ids[0], tid);
+      for (const x of ids) {
+        if (x !== uid) {
+          db.prepare('INSERT INTO notifications (user_id, type, content) VALUES (?, ?, ?)')
+            .run(x, 'task', `您被分配了任务：${task.title}`);
+        }
+      }
+    }
     return { ok: true };
   });
 
-  // 删除任务（权限同更新）
+  // 看板任务排序（支持跨阶段移动）
+  // body: { items: [{ id, stage_id }] }，数组顺序即列内/全局顺序
+  app.put('/api/cases/:id/tasks/reorder', async (req, reply) => {
+    const cid = Number((req.params as any).id);
+    if (req.user!.role !== 'admin' && !isCaseMember(req.user!.id, cid)) {
+      return reply.status(403).send({ error: '无权访问' });
+    }
+    const { items } = req.body as { items: { id: number; stage_id: number | null }[] };
+    if (!Array.isArray(items)) return reply.status(400).send({ error: '参数错误' });
+    const upd = db.prepare('UPDATE tasks SET sort_order = ?, stage_id = ? WHERE id = ? AND case_id = ?');
+    db.exec('BEGIN');
+    try {
+      items.forEach((it, i) => upd.run(i, it.stage_id ?? null, it.id, cid));
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      return reply.status(500).send({ error: '排序失败' });
+    }
+    return { ok: true };
+  });
+
+  // 删除任务
   app.delete('/api/tasks/:tid', async (req, reply) => {
     const tid = Number((req.params as any).tid);
     const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(tid) as any;
     if (!task) return reply.status(404).send({ error: '任务不存在' });
     const uid = req.user!.id;
     const allowed = req.user!.role === 'admin'
-      || task.assignee_id === uid
+      || isAssignee(tid, uid)
       || (task.case_id && isCaseMember(uid, task.case_id));
     if (!allowed) return reply.status(403).send({ error: '无权操作该任务' });
     db.prepare('DELETE FROM tasks WHERE id = ?').run(tid);
@@ -187,19 +313,17 @@ export default async function taskRoutes(app: FastifyInstance) {
   });
 
   // 批量删除任务
-  // body: { ids: [1, 2, 3] }；权限校验同单条删除
   app.post('/api/tasks/batch-delete', async (req, reply) => {
     const ids = (req.body as any)?.ids as number[] | undefined;
     if (!Array.isArray(ids) || ids.length === 0) {
       return reply.status(400).send({ error: '请指定要删除的任务' });
     }
-    if (ids.length > 200) return reply.status(400).send({ error: '一次最多删除 200 个任务' });
+    if (ids.length > 200) return reply.status(400).send({ error: '一次最多删除 200 个' });
     const uid = req.user!.id;
     const placeholders = ids.map(() => '?').join(',');
-    const rows = db.prepare(`SELECT id, assignee_id, case_id FROM tasks WHERE id IN (${placeholders})`).all(...ids) as any[];
-    // 权限校验：每个任务都要校验
+    const rows = db.prepare(`SELECT id, case_id FROM tasks WHERE id IN (${placeholders})`).all(...ids) as any[];
     for (const t of rows) {
-      const allowed = uid === t.assignee_id
+      const allowed = isAssignee(t.id, uid)
         || req.user!.role === 'admin'
         || (t.case_id && isCaseMember(uid, t.case_id));
       if (!allowed) return reply.status(403).send({ error: `无权删除任务 ${t.id}` });
@@ -209,17 +333,12 @@ export default async function taskRoutes(app: FastifyInstance) {
     return { ok: true, deleted: deleted.changes };
   });
 
-  // 推送到 macOS 提醒事项 / 日历的接口已移除：
-  // osascript 只能操作部署平台本机，远程访问（如蒲公英）场景下写入的是服务器而非当前电脑。
-  // 统一改为下载 .ics 文件，双击导入当前电脑的日历（事件含 VALARM 到点提醒，可替代提醒事项）。
-
-  // 批量导出多个任务为一个 .ics 文件（合并为单 VCALENDAR 多 VEVENT）
-  // 用法：GET /api/tasks/export-ics?ids=1,2,3
+  // 批量导出 .ics
   app.get('/api/tasks/export-ics', async (req, reply) => {
     const idsParam = String((req.query as any).ids || '');
     const ids = idsParam.split(',').map((s) => Number(s.trim())).filter((n) => Number.isFinite(n) && n > 0);
     if (ids.length === 0) return reply.status(400).send({ error: '请指定要导出的任务' });
-    if (ids.length > 200) return reply.status(400).send({ error: '一次最多导出 200 个任务' });
+    if (ids.length > 200) return reply.status(400).send({ error: '一次最多导出 200 个' });
 
     const uid = req.user!.id;
     const placeholders = ids.map(() => '?').join(',');
@@ -229,9 +348,8 @@ export default async function taskRoutes(app: FastifyInstance) {
        WHERE t.id IN (${placeholders})`
     ).all(...ids) as any[];
 
-    // 权限校验：每个任务都要校验（admin / 负责人 / 案件成员）
     for (const t of rows) {
-      const allowed = uid === t.assignee_id
+      const allowed = isAssignee(t.id, uid)
         || req.user!.role === 'admin'
         || (t.case_id && isCaseMember(uid, t.case_id));
       if (!allowed) return reply.status(403).send({ error: `无权导出任务 ${t.id}` });
@@ -253,14 +371,14 @@ export default async function taskRoutes(app: FastifyInstance) {
     return reply.send(ics);
   });
 
-  // 导出单个任务为 .ics 日历文件
+  // 导出单个任务 .ics
   app.get('/api/tasks/:tid/export-ics', async (req, reply) => {
     const tid = Number((req.params as any).tid);
     const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(tid) as any;
     if (!task) return reply.status(404).send({ error: '任务不存在' });
     const uid = req.user!.id;
     const allowed = req.user!.role === 'admin'
-      || task.assignee_id === uid
+      || isAssignee(tid, uid)
       || (task.case_id && isCaseMember(uid, task.case_id));
     if (!allowed) return reply.status(403).send({ error: '无权操作该任务' });
     if (!task.due_date) {

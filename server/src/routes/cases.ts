@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import path from 'node:path';
 import fs from 'node:fs';
-import { db, CASES_DIR } from '../db/schema.js';
+import { db } from '../db/schema.js';
+import { resolveCasesRoot } from '../services/settings.js';
 import { STAGE_TEMPLATES, CASE_TYPE_LABELS } from '../db/seed.js';
 import { isCaseMember } from '../plugins/auth.js';
 import { logAudit } from '../services/audit.js';
@@ -128,7 +129,6 @@ export default async function caseRoutes(app: FastifyInstance) {
     const entrust_start = pick('entrust_start');
     const { contacts } = body;
     if (!name?.trim() || !type) return reply.status(400).send({ error: '案件名称与类型为必填' });
-    if (!hearingDate) return reply.status(400).send({ error: '开庭时间为必填' });
     const list: ContactInput[] = Array.isArray(contacts) ? contacts : [];
     const hasOur = list.some((c) => c.category === 'our' && c.name?.trim());
     const hasOpp = list.some((c) => c.category === 'opponent' && c.name?.trim());
@@ -136,16 +136,38 @@ export default async function caseRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: '我方与对方当事人为必填' });
     }
 
+    // 负责人（案件主负责人）：默认创建人；须为在职用户
+    const leadId = Number(body.lead_id) || req.user!.id;
+    const leadUser = db.prepare("SELECT id FROM users WHERE id = ? AND status = 'active'").get(leadId) as any;
+    if (!leadUser) return reply.status(400).send({ error: '负责人不存在或已停用' });
+
+    // 所选看板模板校验（事务前完成，避免事务悬挂）
+    const tplId = Number(body.board_template_id) || 0;
+    let tplStages: string[] | null = null;
+    if (tplId) {
+      const tpl = db.prepare('SELECT stages FROM board_templates WHERE id = ?').get(tplId) as any;
+      if (!tpl) return reply.status(400).send({ error: '所选看板管理不存在' });
+      try { tplStages = JSON.parse(tpl.stages); } catch { tplStages = null; }
+      if (!Array.isArray(tplStages) || tplStages.length === 0) {
+        return reply.status(400).send({ error: '所选看板管理阶段为空' });
+      }
+    }
+
     const caseNo = genCaseNo(type);
     const folderName = `${caseNo}-${name}`;
-    const folderPath = path.join(CASES_DIR, folderName);
+    // 主文件夹根路径由管理员在「系统设置」中配置（默认使用服务器 data/cases）
+    const root = resolveCasesRoot();
+    if (!fs.existsSync(root)) {
+      return reply.status(400).send({ error: '案件主文件夹路径不可用：请检查「系统设置」中的根路径是否存在/已挂载' });
+    }
+    const folderPath = path.join(root, folderName);
     fs.mkdirSync(folderPath, { recursive: true });
 
     db.exec('BEGIN');
     try {
       const info = db.prepare(
         'INSERT INTO cases (case_no, name, type, lead_id, folder_path, court, hearing_date, summary) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-      ).run(caseNo, name.trim(), type, req.user!.id, folderPath, court || null, hearingDate, summary || null);
+      ).run(caseNo, name.trim(), type, leadId, folderPath, court || null, hearingDate, summary || null);
       const cid = Number(info.lastInsertRowid);
 
       const insParty = db.prepare(
@@ -166,17 +188,33 @@ export default async function caseRoutes(app: FastifyInstance) {
         'INSERT INTO case_legal_info (case_id, cause, court_case_no, amount, entrust_start) VALUES (?, ?, ?, ?, ?)'
       ).run(cid, cause || null, court_case_no || null, amount || null, entrust_start || null);
 
-      const stageList = STAGE_TEMPLATES[type] || STAGE_TEMPLATES.other;
+      // 看板阶段：优先使用所选看板模板；否则取该案件类型的默认模板（管理员可改，动态生效）
+      let stageList: string[] | null = null;
+      if (!tplId) {
+        const def = db.prepare('SELECT stages FROM board_templates WHERE type_key = ?').get(type) as any;
+        if (def) {
+          try { stageList = JSON.parse(def.stages); } catch { stageList = null; }
+          if (!Array.isArray(stageList) || stageList.length === 0) stageList = null;
+        }
+      }
+      if (!stageList) stageList = STAGE_TEMPLATES[type] || STAGE_TEMPLATES.other;
       const insStage = db.prepare('INSERT INTO case_stages (case_id, name, sort_order) VALUES (?, ?, ?)');
       stageList.forEach((s: string, i: number) => insStage.run(cid, s, i));
 
-      db.prepare('INSERT INTO case_members (case_id, user_id) VALUES (?, ?)').run(cid, req.user!.id);
+      // 创建人与负责人均加入案件成员（同一人则去重）
+      const insMember = db.prepare('INSERT OR IGNORE INTO case_members (case_id, user_id) VALUES (?, ?)');
+      insMember.run(cid, req.user!.id);
+      insMember.run(cid, leadId);
 
-      // 开庭时间自动记入待办（负责人=主办律师，高优先级）
-      db.prepare(
-        `INSERT INTO tasks (case_id, title, assignee_id, due_date, priority, kind)
-         VALUES (?, '开庭', ?, ?, 'high', 'hearing')`
-      ).run(cid, req.user!.id, hearingDate);
+      // 开庭时间非必填：填写时自动记入待办（负责人名下，高优先级）
+      if (hearingDate) {
+        const hearingInfo = db.prepare(
+          `INSERT INTO tasks (case_id, title, assignee_id, due_date, priority, kind)
+           VALUES (?, '开庭', ?, ?, 'high', 'hearing')`
+        ).run(cid, leadId, hearingDate);
+        db.prepare('INSERT OR IGNORE INTO task_assignees (task_id, user_id) VALUES (?, ?)')
+          .run(Number(hearingInfo.lastInsertRowid), leadId);
+      }
 
       logAudit(req.user!.id, 'case_create', 'case', cid, `${caseNo} ${name}`);
       db.exec('COMMIT');
@@ -214,9 +252,11 @@ export default async function caseRoutes(app: FastifyInstance) {
         if (hearingTask) {
           db.prepare('UPDATE tasks SET due_date = ? WHERE id = ?').run(hd, hearingTask.id);
         } else {
-          db.prepare(
+          const newHearing = db.prepare(
             "INSERT INTO tasks (case_id, title, assignee_id, due_date, priority, kind) VALUES (?, '开庭', ?, ?, 'high', 'hearing')"
           ).run(cid, caseRow.lead_id, hd);
+          db.prepare('INSERT OR IGNORE INTO task_assignees (task_id, user_id) VALUES (?, ?)')
+            .run(Number(newHearing.lastInsertRowid), caseRow.lead_id);
         }
       } else if (hearingTask) {
         db.prepare('DELETE FROM tasks WHERE id = ?').run(hearingTask.id);

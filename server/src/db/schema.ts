@@ -97,11 +97,20 @@ export function initDb() {
       title TEXT NOT NULL,
       description TEXT,
       assignee_id INTEGER REFERENCES users(id),
+      start_date TEXT,
       due_date TEXT,
+      sort_order INTEGER NOT NULL DEFAULT 0,
       priority TEXT NOT NULL DEFAULT 'medium' CHECK(priority IN ('high','medium','low')),
       status TEXT NOT NULL DEFAULT 'todo' CHECK(status IN ('todo','doing','done','expired')),
       kind TEXT,
+      completed_at TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    -- 任务处理人（多选）：一个任务可有多名处理人；assignee_id 保留为首位处理人以兼容旧查询
+    CREATE TABLE IF NOT EXISTS task_assignees (
+      task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      PRIMARY KEY (task_id, user_id)
     );
     CREATE TABLE IF NOT EXISTS deadlines (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -124,20 +133,12 @@ export function initDb() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
       parent_id INTEGER REFERENCES comments(id),
+      target_type TEXT NOT NULL DEFAULT 'global' CHECK(target_type IN ('global','stage','task')),
+      target_id INTEGER,
       content TEXT NOT NULL,
       mentions TEXT,
       author_id INTEGER NOT NULL REFERENCES users(id),
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-    CREATE TABLE IF NOT EXISTS evidences (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
-      group_name TEXT,
-      name TEXT NOT NULL,
-      source TEXT,
-      purpose TEXT,
-      file_id INTEGER,
-      remark TEXT
     );
     CREATE TABLE IF NOT EXISTS templates (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -159,7 +160,8 @@ export function initDb() {
       mime_type TEXT,
       size INTEGER NOT NULL,
       category TEXT NOT NULL DEFAULT 'file',
-      uploaded_by INTEGER NOT NULL REFERENCES users(id),
+      -- 可空：同步扫描入库的文件没有上传人
+      uploaded_by INTEGER REFERENCES users(id),
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     -- OCR 文本独立存储：避免大文本膨胀 file_records 主表，file_id 与 file_records 一对一
@@ -169,10 +171,14 @@ export function initDb() {
       ocr_text TEXT,
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
-    CREATE TABLE IF NOT EXISTS evidence_files (
+    -- 看板模板：管理员维护的阶段列模板（stages 为 JSON 字符串数组），建案时可选用
+    -- type_key 非空表示内置默认模板（对应案件类型），禁止删除、仅可修改
+    CREATE TABLE IF NOT EXISTS board_templates (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      evidence_id INTEGER NOT NULL REFERENCES evidences(id) ON DELETE CASCADE,
-      file_id INTEGER NOT NULL REFERENCES file_records(id) ON DELETE CASCADE,
+      name TEXT NOT NULL UNIQUE,
+      stages TEXT NOT NULL,
+      type_key TEXT UNIQUE,
+      creator_id INTEGER REFERENCES users(id),
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE TABLE IF NOT EXISTS conflict_reports (
@@ -257,6 +263,12 @@ export function initDb() {
     );
     CREATE INDEX IF NOT EXISTS idx_ai_thread_messages_thread ON ai_thread_messages(thread_id, id);
     CREATE INDEX IF NOT EXISTS idx_ai_threads_user ON ai_threads(user_id, last_used_at);
+    -- 系统设置（键值对）：如 cases_root = 所有案件的主文件夹根路径（管理员配置）
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
     CREATE VIRTUAL TABLE IF NOT EXISTS fts_cases USING fts5(name, content='', tokenize='trigram');
     CREATE VIRTUAL TABLE IF NOT EXISTS fts_notes USING fts5(content, content='', tokenize='trigram');
     CREATE VIRTUAL TABLE IF NOT EXISTS fts_comments USING fts5(content, content='', tokenize='trigram');
@@ -372,6 +384,26 @@ export function initDb() {
     db.exec('ALTER TABLE tasks ADD COLUMN kind TEXT');
   }
 
+  // 老库迁移：tasks 补充开始时间/看板排序/完成时间
+  for (const col of ['start_date', 'sort_order', 'completed_at']) {
+    const cols = db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[];
+    if (!cols.some((c) => c.name === col)) {
+      const ddl = col === 'sort_order'
+        ? 'ALTER TABLE tasks ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0'
+        : `ALTER TABLE tasks ADD COLUMN ${col} TEXT`;
+      db.exec(ddl);
+    }
+  }
+
+  // 老库迁移：comments 补充 target_type/target_id（评论归属：全局/阶段/任务）
+  const commentCols = db.prepare('PRAGMA table_info(comments)').all() as { name: string }[];
+  if (!commentCols.some((c) => c.name === 'target_type')) {
+    db.exec("ALTER TABLE comments ADD COLUMN target_type TEXT NOT NULL DEFAULT 'global'");
+  }
+  if (!commentCols.some((c) => c.name === 'target_id')) {
+    db.exec('ALTER TABLE comments ADD COLUMN target_id INTEGER');
+  }
+
   // 老库迁移：tasks.status 增加 'expired' 状态（CHECK 约束变化需重建表）
   const tasksSqlRow = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'").get() as { sql: string } | undefined;
   if (tasksSqlRow?.sql && !tasksSqlRow.sql.includes("'expired'")) {
@@ -383,14 +415,17 @@ export function initDb() {
         title TEXT NOT NULL,
         description TEXT,
         assignee_id INTEGER REFERENCES users(id),
+        start_date TEXT,
         due_date TEXT,
+        sort_order INTEGER NOT NULL DEFAULT 0,
         priority TEXT NOT NULL DEFAULT 'medium' CHECK(priority IN ('high','medium','low')),
         status TEXT NOT NULL DEFAULT 'todo' CHECK(status IN ('todo','doing','done','expired')),
         kind TEXT,
+        completed_at TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
-      INSERT INTO tasks_new2 (id, case_id, stage_id, title, description, assignee_id, due_date, priority, status, kind, created_at)
-      SELECT id, case_id, stage_id, title, description, assignee_id, due_date, priority, status, kind, created_at FROM tasks;
+      INSERT INTO tasks_new2 (id, case_id, stage_id, title, description, assignee_id, start_date, due_date, sort_order, priority, status, kind, completed_at, created_at)
+      SELECT id, case_id, stage_id, title, description, assignee_id, start_date, due_date, sort_order, priority, status, kind, completed_at, created_at FROM tasks;
       DROP TABLE tasks;
       ALTER TABLE tasks_new2 RENAME TO tasks;
     `);
@@ -405,24 +440,29 @@ export function initDb() {
       AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.case_id = c.id AND t.kind = 'hearing')
   `);
 
+  // 将 assignee_id 回填到多选处理人表（须在所有 tasks 重建/回填之后执行）
+  db.exec(`
+    INSERT OR IGNORE INTO task_assignees (task_id, user_id)
+    SELECT id, assignee_id FROM tasks WHERE assignee_id IS NOT NULL
+  `);
+
   // 老库迁移：file_records 补充 category 列（区分普通资料与证据文件）
   const fileCols = db.prepare('PRAGMA table_info(file_records)').all() as { name: string }[];
   if (!fileCols.some((c) => c.name === 'category')) {
     db.exec("ALTER TABLE file_records ADD COLUMN category TEXT NOT NULL DEFAULT 'file'");
   }
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS evidence_files (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      evidence_id INTEGER NOT NULL REFERENCES evidences(id) ON DELETE CASCADE,
-      file_id INTEGER NOT NULL REFERENCES file_records(id) ON DELETE CASCADE,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    )
-  `);
-  // 历史数据：已通过 evidences.file_id 关联的单文件迁移到 evidence_files
-  db.exec(`
-    INSERT OR IGNORE INTO evidence_files (evidence_id, file_id)
-    SELECT id, file_id FROM evidences WHERE file_id IS NOT NULL
-  `);
+  // 老库迁移：证据清单功能已移除
+  // - 原证据类文件（category='evidence'，存于 evidence/ 子目录）归位为普通资料，仍可在文书资料中查看
+  // - 删除 evidences / evidence_files 两张表
+  db.exec("UPDATE file_records SET category = 'file' WHERE category = 'evidence'");
+  db.exec('DROP TABLE IF EXISTS evidence_files');
+  db.exec('DROP TABLE IF EXISTS evidences');
+
+  // 老库迁移：board_templates 补充 type_key 列（内置默认模板标记）
+  const btCols = db.prepare('PRAGMA table_info(board_templates)').all() as { name: string }[];
+  if (btCols.length && !btCols.some((c) => c.name === 'type_key')) {
+    db.exec('ALTER TABLE board_templates ADD COLUMN type_key TEXT');
+  }
 
   // 老库迁移：file_records 的 ocr_status/ocr_text 拆到 file_ocr_text 表
   // SQLite 不支持直接 DROP COLUMN，需重建表
@@ -457,6 +497,44 @@ export function initDb() {
     db.exec('ALTER TABLE file_records_new RENAME TO file_records');
     db.exec('PRAGMA foreign_keys = ON');
   }
+
+  // 老库迁移：file_records.uploaded_by 放开非空约束（同步扫描入库的文件没有上传人）
+  // 需重建表；保留 id + AUTOINCREMENT，确保 file_ocr_text.file_id 不断链
+  const ubCols = db.prepare('PRAGMA table_info(file_records)').all() as { name: string; notnull: number }[];
+  const ubCol = ubCols.find((c) => c.name === 'uploaded_by');
+  if (ubCol && ubCol.notnull === 1) {
+    db.exec('PRAGMA foreign_keys = OFF');
+    db.exec(`
+      CREATE TABLE file_records_ub (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+        rel_path TEXT NOT NULL,
+        file_name TEXT NOT NULL,
+        mime_type TEXT,
+        size INTEGER NOT NULL,
+        category TEXT NOT NULL DEFAULT 'file',
+        uploaded_by INTEGER REFERENCES users(id),
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )
+    `);
+    db.exec(`
+      INSERT INTO file_records_ub (id, case_id, rel_path, file_name, mime_type, size, category, uploaded_by, created_at)
+      SELECT id, case_id, rel_path, file_name, mime_type, size, COALESCE(category, 'file'), uploaded_by, created_at
+      FROM file_records
+    `);
+    db.exec('DROP TABLE file_records');
+    db.exec('ALTER TABLE file_records_ub RENAME TO file_records');
+    db.exec('PRAGMA foreign_keys = ON');
+    db.exec('PRAGMA foreign_key_check');
+  }
+
+  // 老库迁移：file_records 的 (case_id, rel_path) 唯一约束（先去重再建唯一索引，防止并发/扫描重复入库）
+  db.exec(`
+    DELETE FROM file_records WHERE id NOT IN (
+      SELECT MIN(id) FROM file_records GROUP BY case_id, rel_path
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_file_records_case_rel ON file_records(case_id, rel_path);
+  `);
 }
 
 export { db, DATA_DIR, CASES_DIR, TEMPLATES_DIR };

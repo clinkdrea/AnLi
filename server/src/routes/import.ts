@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import path from 'node:path';
 import fs from 'node:fs';
-import { db, CASES_DIR } from '../db/schema.js';
+import { db } from '../db/schema.js';
+import { resolveCasesRoot } from '../services/settings.js';
 import { STAGE_TEMPLATES } from '../db/seed.js';
 import { logAudit } from '../services/audit.js';
 
@@ -44,6 +45,11 @@ export default async function importRoutes(app: FastifyInstance) {
     const header = lines[0].split(',').map((h) => h.trim());
     const results: { success: boolean; name: string; error?: string }[] = [];
 
+    // 主文件夹根路径必须可用，避免在未挂载的网盘路径下批量建出本地空目录
+    if (!fs.existsSync(resolveCasesRoot())) {
+      return reply.status(400).send({ error: '案件主文件夹路径不可用：请检查「系统设置」中的根路径是否存在/已挂载' });
+    }
+
     for (let i = 1; i < lines.length; i++) {
       const cols = lines[i].split(',').map((c) => c.trim());
       const row: any = {};
@@ -71,7 +77,7 @@ export default async function importRoutes(app: FastifyInstance) {
       try {
         const year = row['委托开始日'] ? new Date(row['委托开始日']).getFullYear() : new Date().getFullYear();
         const caseNo = genCaseNo(typeKey, year);
-        const folderPath = path.join(CASES_DIR, `${caseNo}-${name}`);
+        const folderPath = path.join(resolveCasesRoot(), `${caseNo}-${name}`);
         fs.mkdirSync(folderPath, { recursive: true });
 
         const caseInfo = db.prepare(

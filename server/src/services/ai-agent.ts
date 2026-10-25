@@ -1,5 +1,5 @@
 // AI 助手 Agent 服务：
-// - 可选挂载某个案件作为上下文（基本信息/当事人/案情记录/任务/文件与 OCR 文本/证据）
+// - 可选挂载某个案件作为上下文（基本信息/当事人/案情记录/任务/文件与 OCR 文本）
 // - 可选注入启用的 legal-skills 指令
 // - 默认本地 ollama（qwen3:8b），可切换其他模型；ollama 不可用时回退 OpenAI 兼容接口
 import { db } from '../db/schema.js';
@@ -120,7 +120,7 @@ export function buildCaseContext(caseId: number): string {
             COALESCE(o.ocr_status, 'pending') as ocr_status, o.ocr_text
      FROM file_records f
      LEFT JOIN file_ocr_text o ON o.file_id = f.id
-     WHERE f.case_id = ? AND COALESCE(f.category, 'file') != 'evidence'
+     WHERE f.case_id = ?
      ORDER BY f.created_at DESC`
   ).all(caseId) as any[];
   if (files.length) {
@@ -145,22 +145,6 @@ export function buildCaseContext(caseId: number): string {
     if (ocrBlocks.length) {
       lines.push('\n【图片文件 OCR 文本】');
       lines.push(...ocrBlocks);
-    }
-  }
-
-  // 证据清单
-  const evidences = db.prepare(
-    'SELECT group_name, name, source, purpose, remark FROM evidences WHERE case_id = ? ORDER BY group_name, id LIMIT 100'
-  ).all(caseId) as any[];
-  if (evidences.length) {
-    lines.push('\n【证据清单】');
-    for (const e of evidences) {
-      const segs = [e.name];
-      if (e.group_name) segs.push(`证据组：${e.group_name}`);
-      if (e.source) segs.push(`来源：${e.source}`);
-      if (e.purpose) segs.push(`证明目的：${e.purpose}`);
-      if (e.remark) segs.push(`备注：${e.remark}`);
-      lines.push('  - ' + segs.join('；'));
     }
   }
 
@@ -235,7 +219,7 @@ export async function agentChat(input: AgentChatInput): Promise<{ reply: string;
     '要求：',
     '1. 回答专业、简洁、可执行，使用中国法律语境；不确定的内容明确标注「需核实」，不得编造法条编号、案号或司法解释名称。',
     '2. 若提供了【案件档案】，所有分析必须基于档案材料，材料未提及的事实标注「档案未提及」，不得自行假设。',
-    '3. 引用材料时注明来源（如案情记录、OCR 文本、证据清单）。',
+    '3. 引用材料时注明来源（如案情记录、OCR 文本）。',
     '4. 涉及具体法律文书产出时，遵循已加载 skill 的流程与格式；无匹配 skill 时给出专业草稿并提示律师复核。',
   ];
   if (input.caseId) {

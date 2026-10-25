@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Plus, Trash2, FileDown, Square, SquareCheck, Circle, CircleCheck } from 'lucide-react';
+import { Plus, Trash2, FileDown, Square, SquareCheck, Circle, CircleCheck, AlertTriangle } from 'lucide-react';
 import { api } from '../../api';
+import AssigneeSelect, { isTaskOverdue } from './AssigneeSelect';
 
 // 格式化截止日期：支持 YYYY-MM-DD / YYYY-MM-DDTHH:MM / 含秒
 function fmtTaskDue(v: string): string {
@@ -9,12 +10,14 @@ function fmtTaskDue(v: string): string {
   return v;
 }
 
-export default function TasksTab({ caseId }: { caseId: string }) {
+export default function TasksTab({ caseId, onOpenTask }: { caseId: string; onOpenTask?: (taskId: number) => void }) {
   const [tasks, setTasks] = useState<any[]>([]);
+  const [users, setUsers] = useState<any[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [title, setTitle] = useState('');
   const [dueDate, setDueDate] = useState('');
   const [priority, setPriority] = useState('medium');
+  const [assigneeIds, setAssigneeIds] = useState<number[]>([]);
   // 多选：用于批量导出日历 / 批量删除；与"完成标记"独立
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [tip, setTip] = useState('');
@@ -23,17 +26,23 @@ export default function TasksTab({ caseId }: { caseId: string }) {
   const [order, setOrder] = useState<'asc' | 'desc'>('asc');
 
   const load = () => {
-    api(`/cases/${caseId}/tasks?sort=${sortBy}&order=${order}`)
+    // include_expired=1：已过期任务仍显示在待办中（红标提醒），而非直接消失
+    api(`/cases/${caseId}/tasks?sort=${sortBy}&order=${order}&include_expired=1`)
       .then((d) => setTasks(d.tasks || []));
   };
   useEffect(() => { load(); }, [caseId, sortBy, order]);
+  useEffect(() => { api('/users/assignable').then((d) => setUsers(d.users || [])).catch(() => {}); }, []);
 
   const create = async () => {
     if (!title.trim()) return;
     await api(`/cases/${caseId}/tasks`, {
-      method: 'POST', body: JSON.stringify({ title, due_date: dueDate || null, priority }),
+      method: 'POST',
+      body: JSON.stringify({
+        title, due_date: dueDate || null, priority,
+        assignee_ids: assigneeIds.length ? assigneeIds : undefined,
+      }),
     });
-    setTitle(''); setDueDate(''); setPriority('medium'); setShowForm(false);
+    setTitle(''); setDueDate(''); setPriority('medium'); setAssigneeIds([]); setShowForm(false);
     load();
   };
 
@@ -108,7 +117,7 @@ export default function TasksTab({ caseId }: { caseId: string }) {
   return (
     <div>
       <div className="flex justify-between items-center mb-4">
-        <h3 className="font-bold">任务列表</h3>
+        <h3 className="font-bold">待办列表</h3>
         <div className="flex items-center gap-2">
           {/* 排序控件 */}
           <div className="flex items-center gap-1 text-xs">
@@ -154,6 +163,10 @@ export default function TasksTab({ caseId }: { caseId: string }) {
             </select>
             <button onClick={create} className="bg-amber-500 text-white px-4 py-2 rounded text-sm">创建</button>
           </div>
+          <div className="max-w-md">
+            <AssigneeSelect users={users} value={assigneeIds} onChange={setAssigneeIds}
+              placeholder="处理人（不选默认为自己）" />
+          </div>
         </div>
       )}
       {tasks.length > 0 && (
@@ -180,9 +193,20 @@ export default function TasksTab({ caseId }: { caseId: string }) {
                 {isSel ? <SquareCheck className="w-4 h-4" /> : <Square className="w-4 h-4" />}
               </button>
               <div className="flex-1 min-w-0">
-                <span className={t.status === 'done' ? 'line-through text-slate-400' : ''}>{t.title}</span>
+                <span className={`cursor-pointer hover:text-amber-600 ${t.status === 'done' ? 'line-through text-slate-400' : ''}`}
+                  onClick={() => onOpenTask?.(t.id)}>{t.title}</span>
                 <span className={`ml-2 text-xs ${pColor(t.priority)}`}>{t.priority === 'high' ? '高' : t.priority === 'medium' ? '中' : '低'}</span>
-                {t.due_date && <span className="ml-2 text-xs text-slate-400">截止 {fmtTaskDue(t.due_date)}</span>}
+                {isTaskOverdue(t.status, t.due_date) && (
+                  <span className="ml-2 inline-flex items-center gap-0.5 text-xs px-1.5 py-px rounded-full bg-red-100 text-red-600 font-medium">
+                    <AlertTriangle className="w-3 h-3" />已过期
+                  </span>
+                )}
+                {t.assignees?.length > 0 && (
+                  <span className="ml-2 text-xs text-slate-400">
+                    {t.assignees.length === 1 ? t.assignees[0].name : `${t.assignees[0].name} 等${t.assignees.length}人`}
+                  </span>
+                )}
+                {t.due_date && <span className={`ml-2 text-xs ${isTaskOverdue(t.status, t.due_date) ? 'text-red-500 font-medium' : 'text-slate-400'}`}>截止 {fmtTaskDue(t.due_date)}</span>}
                 {!t.due_date && <span className="ml-2 text-xs text-slate-300">未设截止</span>}
               </div>
               {/* 行末：完成状态图标（icon，非 radio） */}

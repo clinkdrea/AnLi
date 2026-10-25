@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Upload, Download, Trash2, FileText, Image, FileArchive, Copy, FolderInput, X, Search, ChevronRight, Eye, Pencil } from 'lucide-react';
+import { Upload, Download, Trash2, FileText, Image, FileArchive, Copy, FolderInput, FolderOpen, RefreshCw, X, Search, ChevronRight, Eye, Pencil } from 'lucide-react';
 import { api } from '../../api';
 import OcrActions, { isImageFile } from './OcrActions';
 import { RenameFileModal } from './RenameFile';
@@ -25,22 +25,43 @@ export default function FilesTab({ caseId, onChanged }: { caseId: string; onChan
   const [showCaseModal, setShowCaseModal] = useState(false);
   const [tip, setTip] = useState('');
   const [renaming, setRenaming] = useState<any>(null);
+  const [refreshing, setRefreshing] = useState(false);
 
-  const load = () => {
-    fetch(`/api/cases/${caseId}/files`, { credentials: 'include' })
-      .then((r) => r.json()).then((d) => setFiles(d.files || []));
-  };
-  useEffect(() => { load(); }, [caseId]);
+  // sync=true 时先扫描案件文件夹，使磁盘上的增删改反映到列表（打开/刷新/操作后用）
+  const load = (sync = false) =>
+    fetch(`/api/cases/${caseId}/files${sync ? '?sync=1' : ''}`, { credentials: 'include' })
+      .then((r) => r.json()).then((d) => setFiles(d.files || []))
+      .catch(() => {});
+  useEffect(() => { load(true); }, [caseId]);
 
-  // 有图片正在识别时（如后台 worker 自动识别），每 3 秒轮询刷新
+  // 有图片正在识别时（如后台 worker 自动识别），每 3 秒轮询刷新（不重复扫描目录）
   const hasProcessing = files.some((f) => isImageFile(f.file_name) && f.ocr_status === 'processing');
   useEffect(() => {
     if (!hasProcessing) return;
-    const t = setInterval(load, 3000);
+    const t = setInterval(() => load(false), 3000);
     return () => clearInterval(t);
   }, [hasProcessing]);
 
-  const reloadAll = () => { load(); onChanged?.(); };
+  const reloadAll = () => { load(true); onChanged?.(); };
+
+  const refresh = async () => {
+    setRefreshing(true);
+    try { await load(true); } finally { setRefreshing(false); }
+  };
+
+  // 打开案件文件夹（本机系统命令），便于在文件夹中直接增删改文件
+  const openFolder = async () => {
+    setTip('');
+    try {
+      const r = await fetch(`/api/cases/${caseId}/open-folder`, { method: 'POST', credentials: 'include' });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || '打开失败');
+      setTip('已在本地打开案件文件夹');
+      setTimeout(() => setTip(''), 3000);
+    } catch (e: any) {
+      setTip(e.message || '打开失败');
+    }
+  };
 
   const upload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const list = e.target.files;
@@ -80,8 +101,16 @@ export default function FilesTab({ caseId, onChanged }: { caseId: string; onChan
   return (
     <div>
       <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
-        <p className="text-sm text-slate-500">文件存放在案件文件夹中，支持 PDF / Word / Excel / 图片等；图片可 OCR 识别并在弹窗查看、复制文本</p>
+        <p className="text-sm text-slate-500">文件实际存放在案件文件夹中（支持 PDF / Word / Excel / 图片等）；在文件夹内增删改文件后，点「刷新」即同步到本列表。图片可 OCR 识别。</p>
         <div className="flex gap-2">
+          <button onClick={openFolder}
+            className="flex items-center gap-1 border px-3 py-2 rounded text-sm hover:bg-slate-50">
+            <FolderOpen className="w-4 h-4" /> 打开文件夹
+          </button>
+          <button onClick={refresh} disabled={refreshing}
+            className="flex items-center gap-1 border px-3 py-2 rounded text-sm hover:bg-slate-50 disabled:opacity-50">
+            <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} /> 刷新
+          </button>
           <button onClick={() => setShowTplModal(true)}
             className="flex items-center gap-1 border px-3 py-2 rounded text-sm hover:bg-slate-50">
             <Copy className="w-4 h-4" /> 从模板复制
@@ -125,7 +154,7 @@ export default function FilesTab({ caseId, onChanged }: { caseId: string; onChan
                   </div>
                 </td>
                 <td className="px-4 py-3 text-slate-500">{formatSize(f.size)}</td>
-                <td className="px-4 py-3 text-slate-500">{f.uploader_name}</td>
+                <td className="px-4 py-3 text-slate-500">{f.uploader_name || '外部导入'}</td>
                 <td className="px-4 py-3">
                   <OcrActions file={f} size="cell" onChanged={load} />
                 </td>
@@ -374,7 +403,7 @@ function CopyFromCaseModal({ caseId, onClose, onCopied }: any) {
   useEffect(() => {
     if (!selected) return;
     setSel(new Set());
-    api(`/cases/${selected.id}/files`).then((d) => setFiles(d.files || []));
+    api(`/cases/${selected.id}/files?sync=1`).then((d) => setFiles(d.files || []));
   }, [selected]);
 
   const toggle = (id: number) => setSel((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });

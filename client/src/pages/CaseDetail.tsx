@@ -7,11 +7,11 @@ import BoardTab from '../components/case/BoardTab';
 import TimelineTab from '../components/case/TimelineTab';
 import TasksTab from '../components/case/TasksTab';
 import CommentsTab from '../components/case/CommentsTab';
-import EvidencesTab from '../components/case/EvidencesTab';
 import ContactsTab from '../components/case/ContactsTab';
 import AITab from '../components/case/AITab';
+import TaskDetail from '../components/case/TaskDetail';
 
-const TABS = ['概览', '看板', '任务', '时间轴', '文书资料', '证据清单'];
+const TABS = ['概览', '看板', '待办', '时间轴', '文书资料'];
 
 export default function CaseDetail() {
   const { id } = useParams();
@@ -22,6 +22,11 @@ export default function CaseDetail() {
   const [err, setErr] = useState('');
   const [panelOpen, setPanelOpen] = useState(true);
   const [panelTab, setPanelTab] = useState<'comments' | 'ai'>('comments');
+  // 任务二级页面
+  const [openTaskId, setOpenTaskId] = useState<number | null>(null);
+  const [taskRefreshKey, setTaskRefreshKey] = useState(0);
+
+  const reloadBoard = () => { setTaskRefreshKey((k) => k + 1); load(); };
 
   const load = () => api(`/cases/${id}`).then(setData).catch((e) => setErr(e.message));
   useEffect(() => { load(); }, [id]);
@@ -79,11 +84,10 @@ export default function CaseDetail() {
         </div>
         <div className="mt-4">
           {tab === 0 && <Overview data={data} onChanged={load} onGoBoard={() => setTab(1)} />}
-          {tab === 1 && <BoardTab caseId={id!} />}
-          {tab === 2 && <TasksTab caseId={id!} />}
+          {tab === 1 && <BoardTab key={`board-${taskRefreshKey}`} caseId={id!} onOpenTask={setOpenTaskId} />}
+          {tab === 2 && <TasksTab key={`tasks-${taskRefreshKey}`} caseId={id!} onOpenTask={setOpenTaskId} />}
           {tab === 3 && <TimelineTab caseId={id!} />}
           {tab === 4 && <FilesTab caseId={id!} onChanged={load} />}
-          {tab === 5 && <EvidencesTab caseId={id!} />}
         </div>
       </div>
 
@@ -104,6 +108,13 @@ export default function CaseDetail() {
             {panelTab === 'comments' ? <CommentsTab caseId={id!} /> : <AITab caseId={id!} />}
           </div>
         </aside>
+      )}
+
+      {/* 任务二级页面 */}
+      {openTaskId != null && (
+        <TaskDetail taskId={openTaskId}
+          onClose={() => setOpenTaskId(null)}
+          onChanged={reloadBoard} />
       )}
     </div>
   );
@@ -294,7 +305,7 @@ function Overview({ data, onChanged, onGoBoard }: any) {
             </span>
           ))}
         </div>
-        <p className="text-xs text-slate-400 mt-2">共 {stages.length} 个阶段 · 阶段与案情记录均可在看板中拖拽调整</p>
+        <p className="text-xs text-slate-400 mt-2">共 {stages.length} 个阶段 · 阶段与任务均可在看板中拖拽调整，点击任务卡片可查看详情</p>
       </div>
       <div className="bg-white rounded shadow p-5">
         <h3 className="font-bold mb-3">案件状态</h3>

@@ -6,9 +6,10 @@ import { db } from '../db/schema.js';
 function expireOverdueTasks(uid: number) {
   db.prepare(
     `UPDATE tasks SET status = 'expired'
-     WHERE assignee_id = ? AND status = 'todo'
+     WHERE status = 'todo'
        AND due_date IS NOT NULL AND due_date != ''
-       AND due_date < datetime('now')`
+       AND due_date < datetime('now')
+       AND id IN (SELECT task_id FROM task_assignees WHERE user_id = ?)`
   ).run(uid);
 }
 
@@ -25,10 +26,11 @@ export default async function dashboardRoutes(app: FastifyInstance) {
        ORDER BY cm.pinned DESC, cm.last_opened_at DESC, c.created_at DESC LIMIT 200`
     ).all(uid);
 
-    // 我的待办：只显示 status='todo'（不含过期、已完成）
+    // 我的待办：只显示 status='todo'（不含过期、已完成）；多处理人经 task_assignees 关联
     const myTasks = db.prepare(
       `SELECT t.*, c.name as case_name FROM tasks t LEFT JOIN cases c ON t.case_id = c.id
-       WHERE t.assignee_id = ? AND t.status = 'todo'
+       WHERE t.status = 'todo'
+         AND EXISTS (SELECT 1 FROM task_assignees ta WHERE ta.task_id = t.id AND ta.user_id = ?)
        ORDER BY (t.due_date IS NULL), t.due_date ASC LIMIT 50`
     ).all(uid);
 

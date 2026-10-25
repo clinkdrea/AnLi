@@ -6,6 +6,7 @@ import { db, DATA_DIR } from '../db/schema.js';
 import { config } from '../config.js';
 import { isCaseMember } from '../plugins/auth.js';
 import { logAudit } from '../services/audit.js';
+import { caseDir } from '../services/settings.js';
 
 const EXPORT_DIR = config.EXPORTS_DIR || path.join(DATA_DIR, 'exports');
 
@@ -23,12 +24,10 @@ export default async function exportRoutes(app: FastifyInstance) {
     const legal = db.prepare('SELECT * FROM case_legal_info WHERE case_id = ?').get(cid);
     const stages = db.prepare('SELECT * FROM case_stages WHERE case_id = ? ORDER BY sort_order').all(cid);
     const notes = db.prepare('SELECT n.content, n.created_at, u.name as author FROM case_notes n LEFT JOIN users u ON n.author_id = u.id WHERE n.case_id = ? ORDER BY n.created_at').all(cid);
-    const evidences = db.prepare('SELECT * FROM evidences WHERE case_id = ?').all(cid);
     const tasks = db.prepare('SELECT * FROM tasks WHERE case_id = ?').all(cid);
-    const files = db.prepare('SELECT * FROM file_records WHERE case_id = ?').all(cid);
 
     const metadata = {
-      case: caseRow, parties, legal, stages, notes, evidences, tasks,
+      case: caseRow, parties, legal, stages, notes, tasks,
       export_time: new Date().toISOString(),
       exported_by: req.user!.name,
     };
@@ -39,12 +38,13 @@ export default async function exportRoutes(app: FastifyInstance) {
     const zipPath = path.join(EXPORT_DIR, zipName);
 
     // 写入元数据 JSON 到案件文件夹
-    const metaPath = path.join(caseRow.folder_path, '_案件元数据.json');
+    const dir = caseDir(caseRow.folder_path);
+    const metaPath = path.join(dir, '_案件元数据.json');
     fs.writeFileSync(metaPath, JSON.stringify(metadata, null, 2), 'utf-8');
 
     // 使用系统 zip 命令打包
     try {
-      execFileSync('zip', ['-r', zipPath, '.'], { cwd: caseRow.folder_path, stdio: 'pipe' });
+      execFileSync('zip', ['-r', zipPath, '.'], { cwd: dir, stdio: 'pipe' });
     } catch {
       // 如果没有 zip 命令，用 node 内置方式（简单打包）
       return reply.status(500).send({ error: '系统缺少 zip 命令' });

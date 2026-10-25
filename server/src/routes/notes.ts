@@ -111,10 +111,20 @@ export default async function noteRoutes(app: FastifyInstance) {
       if (s.completed_at) events.push({ type: 'stage_done', id: s.id, time: s.completed_at, content: `阶段完成：${s.name}` });
     });
 
+    // 任务创建事件（看板中每个任务都会进入时间轴）
     const tasks = db.prepare(
-      `SELECT id, title, created_at FROM tasks WHERE case_id = ? AND status = 'done'`
+      `SELECT id, title, status, created_at, completed_at FROM tasks WHERE case_id = ?`
     ).all(cid);
-    tasks.forEach((t: any) => events.push({ type: 'task_done', id: t.id, time: t.created_at, content: `任务完成：${t.title}` }));
+    tasks.forEach((t: any) => {
+      events.push({ type: 'task_create', id: t.id, time: t.created_at, content: `任务创建：${t.title}` });
+      if (t.status === 'done') {
+        events.push({
+          type: 'task_done', id: t.id,
+          time: t.completed_at || t.created_at,
+          content: `任务完成：${t.title}`,
+        });
+      }
+    });
 
     events.sort((a, b) => a.time.localeCompare(b.time));
     return { events };

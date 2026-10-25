@@ -35,9 +35,19 @@ export default function NewCaseModal({ onClose }: any) {
   const [errors, setErrors] = useState<any>({});
   const [loading, setLoading] = useState(false);
   const [partyRoles, setPartyRoles] = useState<Record<string, PartyRole[]>>({});
+  const [leadId, setLeadId] = useState<number | ''>('');
+  const [assignable, setAssignable] = useState<any[]>([]);
+  const [boardTemplateId, setBoardTemplateId] = useState<number | ''>('');
+  const [boardTemplates, setBoardTemplates] = useState<any[]>([]);
 
   useEffect(() => {
     api('/party-roles').then((d) => setPartyRoles(d.roles || {})).catch(() => {});
+    // 负责人候选（建案人为主办律师或管理员，均有权限）
+    api('/auth/me').then((me: any) => {
+      setLeadId(me?.user?.id || me?.id || '');
+      return api('/users/assignable');
+    }).then((d: any) => setAssignable(d.users || [])).catch(() => {});
+    api('/board-templates').then((d: any) => setBoardTemplates(d.templates || [])).catch(() => {});
   }, []);
 
   const upd = (i: number, k: keyof Contact, v: string) =>
@@ -60,7 +70,6 @@ export default function NewCaseModal({ onClose }: any) {
   const validate = () => {
     const e: any = {};
     if (!name.trim()) e.name = '请输入案件名称';
-    if (!hearingAt) e.hearing = '请选择开庭时间（开庭将自动记入待办）';
     if (!contacts.some((c) => c.category === 'our' && c.name.trim())) e.our = '请填写我方当事人姓名/名称';
     if (!contacts.some((c) => c.category === 'opponent' && c.name.trim())) e.opponent = '请填写对方当事人姓名/名称';
     const cerr: any = {};
@@ -82,6 +91,8 @@ export default function NewCaseModal({ onClose }: any) {
         body: JSON.stringify({
           name, type,
           legal: { cause, court_case_no: courtCaseNo, court, hearing_at: hearingAt || null, summary },
+          lead_id: leadId || undefined,
+          board_template_id: boardTemplateId || undefined,
           contacts,
         }),
       });
@@ -138,14 +149,27 @@ export default function NewCaseModal({ onClose }: any) {
               <input value={court} onChange={(e) => setCourt(e.target.value)}
                 placeholder="如：北京市第一中级人民法院" className={`w-full ${INPUT}`} />
             </Field>
-            <Field label="开庭时间" required error={errors.hearing}>
+            <Field label="开庭时间">
               <input type="datetime-local" value={hearingAt}
-                onChange={(e) => { setHearingAt(e.target.value); clearErr('hearing'); }}
-                className={`w-full ${inputCls(errors.hearing)}`} />
+                onChange={(e) => setHearingAt(e.target.value)}
+                className={`w-full ${INPUT}`} />
             </Field>
             <Field label="案由">
               <input value={cause} onChange={(e) => setCause(e.target.value)}
                 placeholder="如：买卖合同纠纷" className={`w-full ${INPUT}`} />
+            </Field>
+            <Field label="负责人" required>
+              <select value={leadId} onChange={(e) => setLeadId(e.target.value ? Number(e.target.value) : '')}
+                className={`w-full ${INPUT}`}>
+                {assignable.map((u) => <option key={u.id} value={u.id}>{u.name}（{u.role === 'admin' ? '管理员' : u.role === 'lead' ? '主办律师' : u.role === 'co' ? '协办律师' : '律师助理'}）</option>)}
+              </select>
+            </Field>
+            <Field label="看板管理">
+              <select value={boardTemplateId} onChange={(e) => setBoardTemplateId(e.target.value ? Number(e.target.value) : '')}
+                className={`w-full ${INPUT}`}>
+                <option value="">按案件类型（默认）</option>
+                {boardTemplates.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+              </select>
             </Field>
           </div>
           <Field label="案情简介">

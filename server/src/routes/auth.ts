@@ -28,4 +28,28 @@ export default async function authRoutes(app: FastifyInstance) {
   });
 
   app.get('/api/auth/me', async (req) => ({ user: req.user }));
+
+  // 个人信息：查看本人完整资料
+  app.get('/api/profile', async (req, reply) => {
+    const row = db.prepare('SELECT id, name, account, role, status, created_at FROM users WHERE id = ?')
+      .get(req.user!.id) as any;
+    if (!row) return reply.status(404).send({ error: '用户不存在' });
+    return { user: row };
+  });
+
+  // 个人信息：自助修改密码（需校验原密码）
+  app.put('/api/profile/password', async (req, reply) => {
+    const { oldPassword, newPassword } = req.body as { oldPassword?: string; newPassword?: string };
+    if (!oldPassword || !newPassword) return reply.status(400).send({ error: '原密码与新密码为必填' });
+    if (String(newPassword).length < 6) return reply.status(400).send({ error: '新密码至少 6 位' });
+    const row = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(req.user!.id) as any;
+    if (!row || !bcrypt.compareSync(oldPassword, row.password_hash)) {
+      logAudit(req.user!.id, 'password_change_failed');
+      return reply.status(400).send({ error: '原密码不正确' });
+    }
+    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?')
+      .run(bcrypt.hashSync(newPassword, 10), req.user!.id);
+    logAudit(req.user!.id, 'password_change');
+    return { ok: true };
+  });
 }

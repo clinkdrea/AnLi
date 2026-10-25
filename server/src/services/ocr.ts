@@ -2,6 +2,7 @@ import { execFile, execFileSync } from 'node:child_process';
 import path from 'node:path';
 import fs from 'node:fs';
 import { db } from '../db/schema.js';
+import { caseDir } from './settings.js';
 
 const OCR_SCRIPT = path.resolve(import.meta.dirname, '../../scripts/ocr.swift');
 const OCR_BIN = path.resolve(import.meta.dirname, '../../scripts/ocr');
@@ -53,7 +54,7 @@ async function processFile(fileId: number): Promise<'done' | 'failed' | 'skipped
   setOcr(fileId, 'processing');
 
   const caseRow = db.prepare('SELECT folder_path FROM cases WHERE id = ?').get(file.case_id) as any;
-  const fullPath = path.join(caseRow.folder_path, file.rel_path);
+  const fullPath = path.join(caseDir(caseRow.folder_path), file.rel_path);
 
   if (!fs.existsSync(fullPath)) {
     setOcr(fileId, 'failed');

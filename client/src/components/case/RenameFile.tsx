@@ -9,7 +9,7 @@ export function splitName(fileName: string): { base: string; ext: string } {
   return { base: fileName.slice(0, idx), ext: fileName.slice(idx) };
 }
 
-// 文件重命名弹窗（文书资料 / 证据清单共用）
+// 文件重命名弹窗
 // 只编辑文件名主体，扩展名固定展示（与后端保留原扩展名策略一致）
 export function RenameFileModal({ file, onClose, onRenamed }: {
   file: { id: number; file_name: string };

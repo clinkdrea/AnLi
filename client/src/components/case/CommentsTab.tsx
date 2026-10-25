@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
-import { Send, Trash2, MessageSquare, Users } from 'lucide-react';
+import { Send, Trash2, MessageSquare, Users, Globe, Flag, CheckSquare } from 'lucide-react';
+import { api } from '../../api';
 
 const ALL_CODE = '所有人';
 
-export default function CommentsTab({ caseId }: { caseId: string }) {
+type FixedTarget = { type: 'task'; id: number };
+
+export default function CommentsTab({ caseId, fixedTarget }: { caseId: string; fixedTarget?: FixedTarget }) {
   const [comments, setComments] = useState<any[]>([]);
   const [content, setContent] = useState('');
   const [members, setMembers] = useState<any[]>([]);
@@ -14,11 +17,23 @@ export default function CommentsTab({ caseId }: { caseId: string }) {
   const [mention, setMention] = useState<{ start: number; query: string } | null>(null);
   const [hi, setHi] = useState(0); // 候选高亮下标
 
+  // 评论归属目标（非固定模式下可由用户选择）
+  const [targetType, setTargetType] = useState<'global' | 'stage' | 'task'>('global');
+  const [targetId, setTargetId] = useState<number | ''>('');
+  const [stages, setStages] = useState<any[]>([]);
+  const [tasks, setTasks] = useState<any[]>([]);
+
   const load = () => {
-    fetch(`/api/cases/${caseId}/comments`, { credentials: 'include' }).then((r) => r.json()).then((d) => setComments(d.comments || []));
+    const qs = fixedTarget ? `?target_type=task&target_id=${fixedTarget.id}` : '';
+    fetch(`/api/cases/${caseId}/comments${qs}`, { credentials: 'include' })
+      .then((r) => r.json()).then((d) => setComments(d.comments || []));
     fetch(`/api/cases/${caseId}`, { credentials: 'include' }).then((r) => r.json()).then((d) => setMembers(d.members || []));
+    if (!fixedTarget) {
+      api(`/cases/${caseId}/stages`).then((d) => setStages(d.stages || [])).catch(() => {});
+      api(`/cases/${caseId}/tasks?board=1&include_expired=1`).then((d) => setTasks(d.tasks || [])).catch(() => {});
+    }
   };
-  useEffect(() => { load(); }, [caseId]);
+  useEffect(() => { load(); }, [caseId, fixedTarget?.id]);
 
   // 评论按时间正序（最新在底部），每次更新后滚动到底部
   useEffect(() => {
@@ -108,9 +123,17 @@ export default function CommentsTab({ caseId }: { caseId: string }) {
     setSending(true);
     setMention(null);
     try {
+      const body: any = { content };
+      if (fixedTarget) {
+        body.target_type = 'task';
+        body.target_id = fixedTarget.id;
+      } else if (targetType !== 'global' && targetId !== '') {
+        body.target_type = targetType;
+        body.target_id = Number(targetId);
+      }
       await fetch(`/api/cases/${caseId}/comments`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
-        body: JSON.stringify({ content }),
+        body: JSON.stringify(body),
       });
       setContent('');
       load();
@@ -133,6 +156,29 @@ export default function CommentsTab({ caseId }: { caseId: string }) {
     );
   };
 
+  // 归属徽标：全局 / 阶段 / 任务
+  const renderBadge = (c: any) => {
+    if (c.target_type === 'stage') {
+      return (
+        <span className="inline-flex items-center gap-0.5 text-[11px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">
+          <Flag className="w-3 h-3" /> 阶段：{c.stage_name || '已删除'}
+        </span>
+      );
+    }
+    if (c.target_type === 'task') {
+      return (
+        <span className="inline-flex items-center gap-0.5 text-[11px] px-1.5 py-0.5 rounded bg-violet-100 text-violet-700">
+          <CheckSquare className="w-3 h-3" /> 任务：{c.task_title || '已删除'}
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center gap-0.5 text-[11px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-500">
+        <Globe className="w-3 h-3" /> 全局
+      </span>
+    );
+  };
+
   return (
     <div className="h-full flex flex-col bg-white">
       {/* 消息区：最新在底部 */}
@@ -140,15 +186,16 @@ export default function CommentsTab({ caseId }: { caseId: string }) {
         {comments.length === 0 && (
           <div className="text-center text-slate-400 py-10">
             <MessageSquare className="w-10 h-10 mx-auto mb-2 opacity-50" />
-            暂无评论，在下方发起讨论
+            {fixedTarget ? '该任务暂无讨论，在下方发起评论' : '暂无评论，在下方发起讨论'}
           </div>
         )}
         {comments.map((c) => (
           <div key={c.id} className="group">
-            <div className="flex items-center gap-2 mb-1">
+            <div className="flex items-center gap-2 mb-1 flex-wrap">
               <div className="w-7 h-7 rounded-full bg-amber-500 text-white flex items-center justify-center text-xs shrink-0">{c.author_name?.[0]}</div>
               <span className="font-medium text-sm">{c.author_name}</span>
               <span className="text-xs text-slate-400">{c.created_at}</span>
+              {renderBadge(c)}
               <button onClick={() => del(c.id)}
                 className="ml-auto opacity-0 group-hover:opacity-100 transition text-slate-300 hover:text-red-500">
                 <Trash2 className="w-4 h-4" />
@@ -161,6 +208,36 @@ export default function CommentsTab({ caseId }: { caseId: string }) {
 
       {/* 输入区：置底 */}
       <div className="border-t border-slate-200 p-3">
+        {/* 目标选择（任务页固定归属本任务，不显示选择器，提示语置于输入框 placeholder） */}
+        {!fixedTarget && (
+          <div className="mb-2 flex items-center gap-1.5 flex-wrap">
+            <span className="text-xs text-slate-400">发送到：</span>
+            <select value={targetType}
+              onChange={(e) => { setTargetType(e.target.value as any); setTargetId(''); }}
+              className="text-xs border border-slate-300 rounded px-1.5 py-1 focus:outline-none focus:border-amber-400">
+              <option value="global">全局消息（不指定）</option>
+              <option value="stage">指定阶段</option>
+              <option value="task">指定任务</option>
+            </select>
+            {targetType === 'stage' && (
+              <select value={targetId} onChange={(e) => setTargetId(e.target.value ? Number(e.target.value) : '')}
+                className="text-xs border border-slate-300 rounded px-1.5 py-1 max-w-[170px] focus:outline-none focus:border-amber-400">
+                <option value="">选择阶段…</option>
+                {stages.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+            )}
+            {targetType === 'task' && (
+              <select value={targetId} onChange={(e) => setTargetId(e.target.value ? Number(e.target.value) : '')}
+                className="text-xs border border-slate-300 rounded px-1.5 py-1 max-w-[170px] focus:outline-none focus:border-amber-400">
+                <option value="">选择任务…</option>
+                {tasks.map((t) => <option key={t.id} value={t.id}>{t.title}</option>)}
+              </select>
+            )}
+            {targetType !== 'global' && targetId === '' && (
+              <span className="text-xs text-amber-600">未选择具体{targetType === 'stage' ? '阶段' : '任务'}时将作为全局消息发送</span>
+            )}
+          </div>
+        )}
         <div className="flex gap-1 mb-2 flex-wrap items-center">
           <button onClick={() => insertAtCursor(`@${ALL_CODE} `)}
             title="提及该案件全部成员"
@@ -190,7 +267,9 @@ export default function CommentsTab({ caseId }: { caseId: string }) {
           )}
           <textarea ref={taRef} value={content} onChange={onChange} onKeyDown={onKeyDown}
             onBlur={() => { setTimeout(() => setMention(null), 150); }}
-            placeholder="写下你的讨论，输入 @ 提及成员（Ctrl+Enter 发送）"
+            placeholder={fixedTarget
+              ? '评论将发送到当前任务，任务处理人均可见'
+              : '写下你的讨论，输入 @ 提及成员（Ctrl+Enter 发送）'}
             className="w-full border border-slate-300 rounded px-3 py-2 text-sm min-h-[64px] resize-none focus:outline-none focus:border-amber-400" />
         </div>
         <div className="flex justify-end mt-2">

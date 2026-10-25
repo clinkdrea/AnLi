@@ -48,4 +48,12 @@ export function seed() {
     const insert = db.prepare('INSERT INTO conflict_rules (level, title, clause) VALUES (?, ?, ?)');
     for (const r of DEFAULT_CONFLICT_RULES) insert.run(r.level, r.title, r.clause);
   }
+  // 播种内置默认看板模板（每种案件类型一个，type_key 标记，禁止删除、仅可修改）
+  const seedTpl = db.prepare(
+    "INSERT INTO board_templates (name, stages, type_key) VALUES (?, ?, ?)"
+  );
+  const tplByKey = db.prepare('SELECT id FROM board_templates WHERE type_key = ?');
+  for (const [key, stages] of Object.entries(STAGE_TEMPLATES)) {
+    if (!tplByKey.get(key)) seedTpl.run(`默认·${CASE_TYPE_LABELS[key] || key}`, JSON.stringify(stages), key);
+  }
 }
