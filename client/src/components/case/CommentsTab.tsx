@@ -1,10 +1,23 @@
 import { useEffect, useRef, useState } from 'react';
-import { Send, Trash2, MessageSquare, Users, Globe, Flag, CheckSquare } from 'lucide-react';
+import {
+  Send, Trash2, MessageSquare, Users, Globe, Flag, CheckSquare,
+  ChevronDown, Filter, X
+} from 'lucide-react';
 import { api } from '../../api';
 
 const ALL_CODE = '所有人';
 
 type FixedTarget = { type: 'task'; id: number };
+
+// 级联选择器：扁平的「全局 / 阶段 / 任务」菜单，一级二级都可直接单选
+type CascaderValue = { type: 'global' } | { type: 'stage'; id: number; name: string } | { type: 'task'; id: number; name: string };
+
+function cascaderLabel(v: CascaderValue | null): string {
+  if (!v) return '选择目标…';
+  if (v.type === 'global') return '全局消息（不指定）';
+  if (v.type === 'stage') return `阶段：${v.name}`;
+  return `任务：${v.name}`;
+}
 
 export default function CommentsTab({ caseId, fixedTarget }: { caseId: string; fixedTarget?: FixedTarget }) {
   const [comments, setComments] = useState<any[]>([]);
@@ -13,19 +26,34 @@ export default function CommentsTab({ caseId, fixedTarget }: { caseId: string; f
   const [sending, setSending] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
-  // 提及自动补全状态：mention.start 是内容中 '@' 的下标，query 是 @ 后已输入的片段
   const [mention, setMention] = useState<{ start: number; query: string } | null>(null);
-  const [hi, setHi] = useState(0); // 候选高亮下标
+  const [hi, setHi] = useState(0);
 
-  // 评论归属目标（非固定模式下可由用户选择）
-  const [targetType, setTargetType] = useState<'global' | 'stage' | 'task'>('global');
-  const [targetId, setTargetId] = useState<number | ''>('');
+  // 级联选择器
+  const [target, setTarget] = useState<CascaderValue>({ type: 'global' });
+  const [cascaderOpen, setCascaderOpen] = useState(false);
+  const [cascaderHover, setCascaderHover] = useState<'global' | 'stage' | 'task' | null>(null);
+  const cascaderRef = useRef<HTMLDivElement>(null);
+
+  // 筛选器（隐藏式）
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [filter, setFilter] = useState<{ target_type?: string; target_id?: number | ''; author_id?: number | '' }>({});
+
   const [stages, setStages] = useState<any[]>([]);
   const [tasks, setTasks] = useState<any[]>([]);
 
   const load = () => {
-    const qs = fixedTarget ? `?target_type=task&target_id=${fixedTarget.id}` : '';
-    fetch(`/api/cases/${caseId}/comments${qs}`, { credentials: 'include' })
+    const params = new URLSearchParams();
+    if (fixedTarget) {
+      params.set('target_type', 'task');
+      params.set('target_id', String(fixedTarget.id));
+    } else {
+      if (filter.target_type) params.set('target_type', filter.target_type);
+      if (filter.target_id) params.set('target_id', String(filter.target_id));
+      if (filter.author_id) params.set('author_id', String(filter.author_id));
+    }
+    const qs = params.toString();
+    fetch(`/api/cases/${caseId}/comments${qs ? '?' + qs : ''}`, { credentials: 'include' })
       .then((r) => r.json()).then((d) => setComments(d.comments || []));
     fetch(`/api/cases/${caseId}`, { credentials: 'include' }).then((r) => r.json()).then((d) => setMembers(d.members || []));
     if (!fixedTarget) {
@@ -33,7 +61,20 @@ export default function CommentsTab({ caseId, fixedTarget }: { caseId: string; f
       api(`/cases/${caseId}/tasks?board=1&include_expired=1`).then((d) => setTasks(d.tasks || [])).catch(() => {});
     }
   };
-  useEffect(() => { load(); }, [caseId, fixedTarget?.id]);
+  useEffect(() => { load(); }, [caseId, fixedTarget?.id, filter]);
+
+  // 点击外部关闭级联菜单
+  useEffect(() => {
+    if (!cascaderOpen) return;
+    const h = (e: MouseEvent) => {
+      if (cascaderRef.current && !cascaderRef.current.contains(e.target as Node)) {
+        setCascaderOpen(false);
+        setCascaderHover(null);
+      }
+    };
+    document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
+  }, [cascaderOpen]);
 
   // 评论按时间正序（最新在底部），每次更新后滚动到底部
   useEffect(() => {
@@ -127,9 +168,12 @@ export default function CommentsTab({ caseId, fixedTarget }: { caseId: string; f
       if (fixedTarget) {
         body.target_type = 'task';
         body.target_id = fixedTarget.id;
-      } else if (targetType !== 'global' && targetId !== '') {
-        body.target_type = targetType;
-        body.target_id = Number(targetId);
+      } else if (target.type === 'stage') {
+        body.target_type = 'stage';
+        body.target_id = target.id;
+      } else if (target.type === 'task') {
+        body.target_type = 'task';
+        body.target_id = target.id;
       }
       await fetch(`/api/cases/${caseId}/comments`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
@@ -179,14 +223,230 @@ export default function CommentsTab({ caseId, fixedTarget }: { caseId: string; f
     );
   };
 
+  // ============ 级联选择器浮层 ============
+  const CascaderMenu = () => (
+    <div className="absolute bottom-full left-0 mb-1 z-20 bg-white border border-slate-200 rounded-lg shadow-lg py-1 min-w-[200px]">
+      {/* 一级项：全局（直接可选） */}
+      <button
+        onClick={() => { setTarget({ type: 'global' }); setCascaderOpen(false); setCascaderHover(null); }}
+        className={`w-full text-left px-3 py-1.5 text-sm flex items-center gap-2 hover:bg-amber-50 ${
+          target.type === 'global' ? 'bg-amber-50 text-amber-800' : 'text-slate-700'}`}>
+        <Globe className="w-3.5 h-3.5 text-slate-400" /> 全局消息（不指定）
+      </button>
+
+      {/* 一级项：阶段（hover/点击展开子列表） */}
+      <div
+        className="relative"
+        onMouseEnter={() => setCascaderHover('stage')}
+        onMouseLeave={() => setCascaderHover((h) => h === 'stage' ? null : h)}
+      >
+        <button
+          onClick={() => setCascaderHover((h) => h === 'stage' ? null : 'stage')}
+          className="w-full text-left px-3 py-1.5 text-sm flex items-center gap-2 hover:bg-amber-50 text-slate-700">
+          <Flag className="w-3.5 h-3.5 text-amber-500" /> 指定阶段
+          <ChevronDown className="w-3.5 h-3.5 ml-auto rotate-[-90deg]" />
+        </button>
+        {cascaderHover === 'stage' && (
+          <div className="absolute left-full top-0 ml-0.5 bg-white border border-slate-200 rounded-lg shadow-lg py-1 min-w-[200px] max-h-60 overflow-auto">
+            {stages.length === 0 ? (
+              <div className="px-3 py-1.5 text-xs text-slate-400">暂无阶段</div>
+            ) : stages.map((s) => (
+              <button
+                key={s.id}
+                onClick={() => { setTarget({ type: 'stage', id: s.id, name: s.name }); setCascaderOpen(false); setCascaderHover(null); }}
+                className="w-full text-left px-3 py-1.5 text-sm flex items-center gap-2 hover:bg-amber-50 text-slate-700 truncate max-w-[280px]">
+                {s.name}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* 一级项：任务（hover/点击展开子列表） */}
+      <div
+        className="relative"
+        onMouseEnter={() => setCascaderHover('task')}
+        onMouseLeave={() => setCascaderHover((h) => h === 'task' ? null : h)}
+      >
+        <button
+          onClick={() => setCascaderHover((h) => h === 'task' ? null : 'task')}
+          className="w-full text-left px-3 py-1.5 text-sm flex items-center gap-2 hover:bg-amber-50 text-slate-700">
+          <CheckSquare className="w-3.5 h-3.5 text-violet-500" /> 指定任务
+          <ChevronDown className="w-3.5 h-3.5 ml-auto rotate-[-90deg]" />
+        </button>
+        {cascaderHover === 'task' && (
+          <div className="absolute left-full top-0 ml-0.5 bg-white border border-slate-200 rounded-lg shadow-lg py-1 min-w-[220px] max-h-60 overflow-auto">
+            {tasks.length === 0 ? (
+              <div className="px-3 py-1.5 text-xs text-slate-400">暂无任务</div>
+            ) : tasks.map((t) => (
+              <button
+                key={t.id}
+                onClick={() => { setTarget({ type: 'task', id: t.id, name: t.title }); setCascaderOpen(false); setCascaderHover(null); }}
+                className="w-full text-left px-3 py-1.5 text-sm flex items-center gap-2 hover:bg-amber-50 text-slate-700 truncate max-w-[300px]">
+                {t.title}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  // ============ Filter 面板 ============
+  const hasFilter = !!(filter.target_type || filter.author_id);
+
+  // 当前筛选条件的人类可读描述（用于汇总行）
+  const filterSummary: string[] = [];
+  if (filter.target_type === 'global') filterSummary.push('归属：全局');
+  if (filter.target_type === 'stage') {
+    const s = filter.target_id ? stages.find((x) => x.id === filter.target_id) : null;
+    filterSummary.push(s ? `归属：阶段 · ${s.name}` : '归属：全部阶段');
+  }
+  if (filter.target_type === 'task') {
+    const t = filter.target_id ? tasks.find((x) => x.id === filter.target_id) : null;
+    filterSummary.push(t ? `归属：任务 · ${t.title}` : '归属：全部任务');
+  }
+  if (filter.author_id) {
+    const m = members.find((x) => x.id === filter.author_id);
+    if (m) filterSummary.push(`成员：${m.name}`);
+  }
+
   return (
     <div className="h-full flex flex-col bg-white">
+      {/* 顶部工具栏：评论数 + 筛选按钮 */}
+      {!fixedTarget && (
+        <div className="px-4 pt-3 border-b border-slate-100">
+          <div className="flex items-center justify-between">
+            <div className="text-sm font-medium text-slate-700">
+              共 {comments.length} 条评论
+              {hasFilter && <span className="ml-2 text-xs text-amber-600">· 已筛选</span>}
+            </div>
+            <button
+              onClick={() => setFilterOpen((v) => !v)}
+              className={`flex items-center gap-1 text-xs px-2.5 py-1 rounded-md transition-colors ${
+                filterOpen || hasFilter ? 'bg-amber-100 text-amber-700' : 'text-slate-500 hover:bg-slate-100'
+              }`}>
+              <Filter className="w-3.5 h-3.5" />
+              {filterOpen ? '收起筛选' : hasFilter ? '筛选中' : '筛选'}
+            </button>
+          </div>
+
+          {/* 隐藏式 Filter 面板 —— 卡片化 */}
+          {filterOpen && (
+            <div className="mt-3 mb-3 bg-slate-50 rounded-lg border border-slate-200 p-4 space-y-3 text-xs">
+              {/* 第一行：按归属 Pill 标签组 */}
+              <div>
+                <div className="text-slate-500 mb-1.5">按归属</div>
+                <div className="flex flex-wrap gap-1.5">
+                  <button
+                    onClick={() => setFilter((f) => ({ ...f, target_type: undefined, target_id: undefined }))}
+                    className={`px-2.5 py-1 rounded-full text-xs transition-colors ${
+                      !filter.target_type ? 'bg-amber-500 text-white' : 'bg-white border border-slate-200 text-slate-500 hover:border-amber-300 hover:text-amber-600'}`}>
+                    全部
+                  </button>
+                  <button
+                    onClick={() => setFilter((f) => ({ ...f, target_type: 'global', target_id: undefined }))}
+                    className={`px-2.5 py-1 rounded-full text-xs inline-flex items-center gap-1 transition-colors ${
+                      filter.target_type === 'global' ? 'bg-amber-500 text-white' : 'bg-white border border-slate-200 text-slate-500 hover:border-amber-300 hover:text-amber-600'}`}>
+                    <Globe className="w-3 h-3" /> 全局
+                  </button>
+                  <button
+                    onClick={() => setFilter((f) => ({ ...f, target_type: 'stage', target_id: undefined }))}
+                    className={`px-2.5 py-1 rounded-full text-xs inline-flex items-center gap-1 transition-colors ${
+                      filter.target_type === 'stage' ? 'bg-amber-500 text-white' : 'bg-white border border-slate-200 text-slate-500 hover:border-amber-300 hover:text-amber-600'}`}>
+                    <Flag className="w-3 h-3" /> 阶段
+                  </button>
+                  <button
+                    onClick={() => setFilter((f) => ({ ...f, target_type: 'task', target_id: undefined }))}
+                    className={`px-2.5 py-1 rounded-full text-xs inline-flex items-center gap-1 transition-colors ${
+                      filter.target_type === 'task' ? 'bg-amber-500 text-white' : 'bg-white border border-slate-200 text-slate-500 hover:border-amber-300 hover:text-amber-600'}`}>
+                    <CheckSquare className="w-3 h-3" /> 任务
+                  </button>
+                </div>
+
+                {/* 二级下拉：选中阶段/任务时出现，独立成行 */}
+                {filter.target_type === 'stage' && (
+                  <div className="mt-2">
+                    <select
+                      value={filter.target_id || ''}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setFilter((f) => ({ ...f, target_id: v ? Number(v) : undefined }));
+                      }}
+                      className="w-full max-w-[260px] border border-slate-200 bg-white rounded-md px-2.5 py-1.5 text-xs focus:outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-200">
+                      <option value="">全部阶段（仅按类型）</option>
+                      {stages.map((s) => (
+                        <option key={s.id} value={s.id}>{s.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+                {filter.target_type === 'task' && (
+                  <div className="mt-2">
+                    <select
+                      value={filter.target_id || ''}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setFilter((f) => ({ ...f, target_id: v ? Number(v) : undefined }));
+                      }}
+                      className="w-full max-w-[260px] border border-slate-200 bg-white rounded-md px-2.5 py-1.5 text-xs focus:outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-200">
+                      <option value="">全部任务（仅按类型）</option>
+                      {tasks.map((t) => (
+                        <option key={t.id} value={t.id}>{t.title}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+              </div>
+
+              {/* 分隔线 */}
+              <div className="border-t border-slate-200/70" />
+
+              {/* 第二行：按成员 */}
+              <div>
+                <div className="text-slate-500 mb-1.5">按成员</div>
+                <select
+                  value={filter.author_id || ''}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setFilter((f) => ({ ...f, author_id: v ? Number(v) : undefined }));
+                  }}
+                  className="w-full max-w-[260px] border border-slate-200 bg-white rounded-md px-2.5 py-1.5 text-xs focus:outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-200">
+                  <option value="">全部成员</option>
+                  {members.map((m) => (
+                    <option key={m.id} value={m.id}>{m.name}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* 激活条件汇总行 */}
+              {hasFilter && (
+                <div className="pt-2 border-t border-slate-200/70 flex items-center justify-between">
+                  <div className="text-slate-500 flex flex-wrap items-center gap-1.5">
+                    {filterSummary.map((s, i) => (
+                      <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 bg-amber-100 text-amber-700 rounded text-[11px]">
+                        {s}
+                      </span>
+                    ))}
+                  </div>
+                  <button
+                    onClick={() => setFilter({})}
+                    className="flex items-center gap-1 px-2 py-1 text-[11px] text-red-500 hover:bg-red-50 rounded">
+                    <X className="w-3 h-3" /> 清除筛选
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* 消息区：最新在底部 */}
       <div ref={listRef} className="flex-1 overflow-auto p-4 space-y-3">
         {comments.length === 0 && (
           <div className="text-center text-slate-400 py-10">
             <MessageSquare className="w-10 h-10 mx-auto mb-2 opacity-50" />
-            {fixedTarget ? '该任务暂无讨论，在下方发起评论' : '暂无评论，在下方发起讨论'}
+            {fixedTarget ? '该任务暂无讨论，在下方发起评论' : hasFilter ? '当前筛选条件下暂无评论' : '暂无评论，在下方发起讨论'}
           </div>
         )}
         {comments.map((c) => (
@@ -208,34 +468,23 @@ export default function CommentsTab({ caseId, fixedTarget }: { caseId: string; f
 
       {/* 输入区：置底 */}
       <div className="border-t border-slate-200 p-3">
-        {/* 目标选择（任务页固定归属本任务，不显示选择器，提示语置于输入框 placeholder） */}
+        {/* 目标选择 —— 级联按钮（任务页固定归属本任务，不显示选择器） */}
         {!fixedTarget && (
           <div className="mb-2 flex items-center gap-1.5 flex-wrap">
             <span className="text-xs text-slate-400">发送到：</span>
-            <select value={targetType}
-              onChange={(e) => { setTargetType(e.target.value as any); setTargetId(''); }}
-              className="text-xs border border-slate-300 rounded px-1.5 py-1 focus:outline-none focus:border-amber-400">
-              <option value="global">全局消息（不指定）</option>
-              <option value="stage">指定阶段</option>
-              <option value="task">指定任务</option>
-            </select>
-            {targetType === 'stage' && (
-              <select value={targetId} onChange={(e) => setTargetId(e.target.value ? Number(e.target.value) : '')}
-                className="text-xs border border-slate-300 rounded px-1.5 py-1 max-w-[170px] focus:outline-none focus:border-amber-400">
-                <option value="">选择阶段…</option>
-                {stages.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-              </select>
-            )}
-            {targetType === 'task' && (
-              <select value={targetId} onChange={(e) => setTargetId(e.target.value ? Number(e.target.value) : '')}
-                className="text-xs border border-slate-300 rounded px-1.5 py-1 max-w-[170px] focus:outline-none focus:border-amber-400">
-                <option value="">选择任务…</option>
-                {tasks.map((t) => <option key={t.id} value={t.id}>{t.title}</option>)}
-              </select>
-            )}
-            {targetType !== 'global' && targetId === '' && (
-              <span className="text-xs text-amber-600">未选择具体{targetType === 'stage' ? '阶段' : '任务'}时将作为全局消息发送</span>
-            )}
+            <div ref={cascaderRef} className="relative">
+              <button
+                onClick={() => setCascaderOpen((v) => !v)}
+                className={`text-xs border rounded px-2 py-1 inline-flex items-center gap-1 max-w-[280px] truncate focus:outline-none focus:border-amber-400 ${
+                  cascaderOpen ? 'border-amber-400 bg-amber-50' : 'border-slate-300 hover:border-slate-400'}`}>
+                {target.type === 'global' && <Globe className="w-3 h-3 text-slate-400" />}
+                {target.type === 'stage' && <Flag className="w-3 h-3 text-amber-500" />}
+                {target.type === 'task' && <CheckSquare className="w-3 h-3 text-violet-500" />}
+                <span className="truncate">{cascaderLabel(target)}</span>
+                <ChevronDown className={`w-3 h-3 transition-transform ${cascaderOpen ? 'rotate-180' : ''}`} />
+              </button>
+              {cascaderOpen && <CascaderMenu />}
+            </div>
           </div>
         )}
         <div className="flex gap-1 mb-2 flex-wrap items-center">

@@ -24,6 +24,10 @@ export default async function commentRoutes(app: FastifyInstance) {
         params.push(Number(q.target_id));
       }
     }
+    if (q.author_id) {
+      where.push('cm.author_id = ?');
+      params.push(Number(q.author_id));
+    }
     const comments = db.prepare(
       `SELECT cm.*, u.name as author_name,
               s.name as stage_name, t.title as task_title
