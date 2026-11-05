@@ -2,7 +2,7 @@
 // 1) 调用 LLM 按 elements-complaint-generator skill 的抽取纪律产出 elements.json
 // 2) 调用 skill 的 fill_template.py 渲染 docx
 // 3) 返回 docx 路径与抽取的要素（供律师复核）
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -11,6 +11,16 @@ import { config } from '../config.js';
 import { buildCaseContext, callLLM } from './ai-agent.js';
 
 const execFileP = promisify(execFile);
+
+/** 找能用的 Python（和 OCR 路由保持一致的策略） */
+let _pyCache: string | null = null;
+function findPython(): string {
+  if (_pyCache) return _pyCache;
+  for (const cand of ['/opt/homebrew/bin/python3.11', 'python3.11', 'python3', 'python']) {
+    try { execFileSync(cand, ['--version'], { stdio: 'ignore' }); _pyCache = cand; return cand; } catch {}
+  }
+  _pyCache = 'python3'; return _pyCache;
+}
 
 const SKILL_DIR = path.join(config.LEGAL_SKILLS_DIR, 'skills', 'elements-complaint-generator');
 const FILL_SCRIPT = path.join(SKILL_DIR, 'scripts', 'fill_template.py');
@@ -165,7 +175,7 @@ export async function generateComplaint(input: ExtractionInput): Promise<Generat
 
   const warnings: string[] = [];
   try {
-    await execFileP('python3', [
+    await execFileP(findPython(), [
       FILL_SCRIPT,
       '--case-type', caseType,
       '--elements', elementsPath,

@@ -167,9 +167,48 @@ export function initDb() {
     -- OCR 文本独立存储：避免大文本膨胀 file_records 主表，file_id 与 file_records 一对一
     CREATE TABLE IF NOT EXISTS file_ocr_text (
       file_id INTEGER PRIMARY KEY REFERENCES file_records(id) ON DELETE CASCADE,
-      ocr_status TEXT NOT NULL DEFAULT 'pending' CHECK(ocr_status IN ('pending','processing','done','failed')),
+      ocr_status TEXT NOT NULL DEFAULT 'pending' CHECK(ocr_status IN ('pending','processing','done','failed','skipped')),
       ocr_text TEXT,
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    -- OCR 任务：大文件（PDF/图片批量）独立 OCR 队列，支持断点续做
+    CREATE TABLE IF NOT EXISTS ocr_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      case_id INTEGER REFERENCES cases(id) ON DELETE SET NULL,
+      file_id INTEGER REFERENCES file_records(id) ON DELETE SET NULL,
+      file_path TEXT NOT NULL,               -- 绝对路径（断点续做不依赖 file_records）
+      file_name TEXT NOT NULL,
+      file_size INTEGER,
+      total_pages INTEGER NOT NULL DEFAULT 0, -- PDF 总页数；图片固定 1
+      done_pages INTEGER NOT NULL DEFAULT 0,  -- 已完成页数（成功+失败都算）
+      failed_pages INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK(status IN ('pending','processing','paused','done','failed','canceled')),
+      engine TEXT NOT NULL DEFAULT 'rapidocr'
+        CHECK(engine IN ('rapidocr','docling','paddleocr','mineru','vision')),
+      ocr_format TEXT NOT NULL DEFAULT 'markdown'
+        CHECK(ocr_format IN ('markdown','json','plain','docx')),
+      result_dir TEXT,                         -- 结果存放目录（相对 DATA_DIR/ocr_results）
+      merged_text TEXT,                        -- 合并后的完整文本（done 时写入）
+      error_msg TEXT,
+      progress_pid INTEGER,                    -- 当前运行的子进程 PID（暂停/取消时 kill）
+      created_by INTEGER REFERENCES users(id),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      started_at TEXT,
+      finished_at TEXT
+    );
+    -- OCR 分页记录：每页独立状态，支持单页重试
+    CREATE TABLE IF NOT EXISTS ocr_pages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      job_id INTEGER NOT NULL REFERENCES ocr_jobs(id) ON DELETE CASCADE,
+      page_num INTEGER NOT NULL,               -- 从 1 开始
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK(status IN ('pending','processing','done','failed','skipped')),
+      text TEXT,
+      result_path TEXT,                        -- 单页结果文件路径
+      error_msg TEXT,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(job_id, page_num)
     );
     -- 看板模板：管理员维护的阶段列模板（stages 为 JSON 字符串数组），建案时可选用
     -- type_key 非空表示内置默认模板（对应案件类型），禁止删除、仅可修改
@@ -274,6 +313,33 @@ export function initDb() {
     CREATE VIRTUAL TABLE IF NOT EXISTS fts_comments USING fts5(content, content='', tokenize='trigram');
     CREATE VIRTUAL TABLE IF NOT EXISTS fts_files USING fts5(ocr_text, content='', tokenize='trigram');
   `);
+
+  // ocr_jobs: 新增 output_dir / current_hint / compress_preset（PDF 预压缩档位）
+  {
+    const cols = db.prepare("PRAGMA table_info(ocr_jobs)").all() as { name: string }[];
+    const colSet = new Set(cols.map((c) => c.name));
+    if (!colSet.has('output_dir')) db.exec('ALTER TABLE ocr_jobs ADD COLUMN output_dir TEXT');
+    if (!colSet.has('current_hint')) db.exec('ALTER TABLE ocr_jobs ADD COLUMN current_hint TEXT');
+    if (!colSet.has('compress_preset')) db.exec('ALTER TABLE ocr_jobs ADD COLUMN compress_preset TEXT');
+  }
+
+  // 老库迁移：file_ocr_text 的 ocr_status 增加 'skipped'（用于跳过不自动 OCR 的历史文件，CHECK 变更需重建表）
+  {
+    const sql = ((db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='file_ocr_text'").get() as any)?.sql || '') as string;
+    if (!sql.includes("'skipped'")) {
+      db.exec(`
+        CREATE TABLE file_ocr_text_new (
+          file_id INTEGER PRIMARY KEY REFERENCES file_records(id) ON DELETE CASCADE,
+          ocr_status TEXT NOT NULL DEFAULT 'pending' CHECK(ocr_status IN ('pending','processing','done','failed','skipped')),
+          ocr_text TEXT,
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO file_ocr_text_new SELECT file_id, ocr_status, ocr_text, updated_at FROM file_ocr_text;
+        DROP TABLE file_ocr_text;
+        ALTER TABLE file_ocr_text_new RENAME TO file_ocr_text;
+      `);
+    }
+  }
 
   // 老库迁移：templates 表补充文件型模板字段，并放开 creator_id 非空约束
   const cols = db.prepare('PRAGMA table_info(templates)').all() as { name: string; notnull: number }[];

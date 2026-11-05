@@ -11,7 +11,7 @@ import ContactsTab from '../components/case/ContactsTab';
 import AITab from '../components/case/AITab';
 import TaskDetail from '../components/case/TaskDetail';
 
-const TABS = ['概览', '看板', '待办', '时间轴', '文书资料'];
+const TABS = ['概览', '看板', '待办', '时间轴', '文书资料', 'AI 助手'];
 
 export default function CaseDetail() {
   const { id } = useParams();
@@ -21,7 +21,6 @@ export default function CaseDetail() {
   const [tab, setTab] = useState(0);
   const [err, setErr] = useState('');
   const [panelOpen, setPanelOpen] = useState(true);
-  const [panelTab, setPanelTab] = useState<'comments' | 'ai'>('comments');
   // 任务二级页面
   const [openTaskId, setOpenTaskId] = useState<number | null>(null);
   const [taskRefreshKey, setTaskRefreshKey] = useState(0);
@@ -47,8 +46,8 @@ export default function CaseDetail() {
   return (
     <div className="flex h-full overflow-hidden">
       {/* 主区 */}
-      <div className="flex-1 min-w-0 overflow-y-auto p-8">
-        <div className="flex items-baseline gap-3 mb-1">
+      <div className="flex-1 min-w-0 flex flex-col overflow-hidden p-8">
+        <div className="flex items-baseline gap-3 mb-1 shrink-0">
           <button onClick={goBack}
             title="返回"
             className="self-center text-slate-400 hover:text-amber-600 p-1 -ml-2">
@@ -74,7 +73,7 @@ export default function CaseDetail() {
           <span>状态：{c.status === 'active' ? '办理中' : c.status === 'closed' ? '已结案' : '已归档'}</span>
         </div>
 
-        <div className="flex gap-2 border-b">
+        <div className="flex gap-2 border-b shrink-0">
           {TABS.map((t, i) => (
             <button key={t} onClick={() => setTab(i)}
               className={`px-4 py-2 text-sm ${tab === i ? 'border-b-2 border-amber-500 text-amber-600 font-medium' : 'text-slate-500'}`}>
@@ -82,30 +81,22 @@ export default function CaseDetail() {
             </button>
           ))}
         </div>
-        <div className="mt-4">
+        <div className="mt-4 flex-1 overflow-auto min-h-0">
           {tab === 0 && <Overview data={data} onChanged={load} onGoBoard={() => setTab(1)} />}
           {tab === 1 && <BoardTab key={`board-${taskRefreshKey}`} caseId={id!} onOpenTask={setOpenTaskId} />}
           {tab === 2 && <TasksTab key={`tasks-${taskRefreshKey}`} caseId={id!} onOpenTask={setOpenTaskId} />}
           {tab === 3 && <TimelineTab caseId={id!} />}
           {tab === 4 && <FilesTab caseId={id!} onChanged={load} />}
+          {tab === 5 && <AITab caseId={id!} />}
         </div>
       </div>
 
-      {/* 右侧面板：评论 / AI 双 Tab，可收起 */}
+      {/* 右侧面板：评论，可收起 */}
       {panelOpen && (
         <aside className="w-[380px] shrink-0 border-l border-slate-200 bg-white flex flex-col">
-          <div className="flex border-b">
-            <button onClick={() => setPanelTab('comments')}
-              className={`flex-1 px-4 py-2.5 text-sm ${panelTab === 'comments' ? 'border-b-2 border-amber-500 text-amber-600 font-medium' : 'text-slate-500'}`}>
-              评论
-            </button>
-            <button onClick={() => setPanelTab('ai')}
-              className={`flex-1 px-4 py-2.5 text-sm ${panelTab === 'ai' ? 'border-b-2 border-amber-500 text-amber-600 font-medium' : 'text-slate-500'}`}>
-              AI 助手
-            </button>
-          </div>
+          <div className="px-4 py-2.5 text-sm font-medium border-b border-slate-200">评论</div>
           <div className="flex-1 overflow-hidden">
-            {panelTab === 'comments' ? <CommentsTab caseId={id!} /> : <AITab caseId={id!} />}
+            <CommentsTab caseId={id!} />
           </div>
         </aside>
       )}

@@ -2,7 +2,7 @@ import { execFile, execFileSync } from 'node:child_process';
 import path from 'node:path';
 import fs from 'node:fs';
 import { db } from '../db/schema.js';
-import { caseDir } from './settings.js';
+import { caseDir, isOcrAutoEnabled } from './settings.js';
 
 const OCR_SCRIPT = path.resolve(import.meta.dirname, '../../scripts/ocr.swift');
 const OCR_BIN = path.resolve(import.meta.dirname, '../../scripts/ocr');
@@ -72,14 +72,23 @@ async function processFile(fileId: number): Promise<'done' | 'failed' | 'skipped
 }
 
 // 扫描所有 pending 状态的图片文件并处理（非图片文件留在 pending，由前端按扩展名展示）
+// 仅处理未跳过的记录；自动 OCR 默认关闭（系统设置可开启），关闭时该队列不处理任何文件
+let queueRunning = false;
 export async function runOCRQueue() {
-  const pending = db.prepare(`
-    SELECT fr.id, fr.file_name FROM file_records fr
-    LEFT JOIN file_ocr_text o ON o.file_id = fr.id
-    WHERE COALESCE(o.ocr_status, 'pending') = 'pending'
-  `).all() as { id: number; file_name: string }[];
-  for (const f of pending) {
-    if (isImage(f.file_name)) await processFile(f.id);
+  if (queueRunning) return;                 // 防止上一轮未结束时重复开跑（避免进程叠加）
+  if (!isOcrAutoEnabled()) return;          // 自动 OCR 未开启
+  queueRunning = true;
+  try {
+    const pending = db.prepare(`
+      SELECT fr.id, fr.file_name FROM file_records fr
+      LEFT JOIN file_ocr_text o ON o.file_id = fr.id
+      WHERE COALESCE(o.ocr_status, 'pending') = 'pending'
+    `).all() as { id: number; file_name: string }[];
+    for (const f of pending) {
+      if (isImage(f.file_name)) await processFile(f.id);
+    }
+  } finally {
+    queueRunning = false;
   }
 }
 

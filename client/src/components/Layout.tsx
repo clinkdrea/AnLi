@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard, Briefcase, LogOut, Scale, Search, ShieldAlert,
-  FileText, BookOpen, Shield, UserCog, ChevronLeft, ChevronRight, ChevronDown, Bot, LayoutGrid, Settings2, Settings, User,
+  FileText, BookOpen, Shield, UserCog, ChevronLeft, ChevronRight, ChevronDown, Bot, LayoutGrid, Settings2, Settings, User, FileScan,
 } from 'lucide-react';
 import { api } from '../api';
 import NotificationBell from './NotificationBell';
@@ -14,6 +14,7 @@ export default function Layout({ user, onLogout, children }: any) {
     { to: '/cases', icon: Briefcase, label: '案件管理' },
     { to: '/conflicts', icon: ShieldAlert, label: '冲突检索' },
     { to: '/ai-assistant', icon: Bot, label: 'AI 助手' },
+    { to: '/ocr', icon: FileScan, label: 'OCR 中心' },
     { to: '/search', icon: Search, label: '全文搜索' },
     { to: '/templates', icon: FileText, label: '文书模板' },
     { to: '/knowledge', icon: BookOpen, label: '知识库' },

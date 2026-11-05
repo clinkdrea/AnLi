@@ -9,8 +9,13 @@
 
 ## 一、环境准备
 
-- Node.js **v22+**（使用了内置 `node:sqlite` 模块）
-- npm 或兼容包管理器
+- Node.js **v22+**（推荐 v24 LTS）
+- npm v10+
+- Homebrew（macOS 必备，装 Python / sqlite / ghostscript）
+- Xcode Command Line Tools（`xcode-select --install`，better-sqlite3 原生编译 + Swift Vision）
+- Python 3.11（`brew install python@3.11`，OCR 引擎依赖）
+- ghostscript（`brew install ghostscript`，OCR PDF 压缩功能）
+- sqlite3 CLI（`brew install sqlite`，备份脚本用）
 - （可选）[Ollama](https://ollama.com) 本地大模型，用于 AI 助手功能
 
 ## 二、安装
@@ -70,21 +75,24 @@ npm run dev
 
 | 命令 | 说明 |
 |---|---|
-| `npm run dev` | 同时启动前后端开发服务（热重载） |
-| `npm run dev -w server` | 仅启动后端 |
+| `npm run dev` | **唯一稳定启动方式**：concurrently 同时启动前后端（热重载） |
+| `npm run dev -w server` | 仅启动后端（注意：单独启动时沙箱 shell 结束后进程会被清理） |
 | `npm run dev -w client` | 仅启动前端 |
 | `npm run build` | 编译前后端产物（server/dist、client/dist） |
 | `npm run start -w server` | 生产模式运行后端（需先 build） |
 | `npm run preview -w client` | 预览前端构建产物 |
 
+> ⚠️ **重要**：必须在自己的 Terminal 里运行 `npm run dev`。Trae 的沙箱 shell 在每次工具命令结束后会清理后台进程，导致 Vite proxy 报 ECONNREFUSED。concurrently 作为前台主进程组运行时不会被清理。
+
 ## 七、注意事项
 
 1. **Node.js 版本**：必须 v22+，低于此版本无法使用内置 `node:sqlite`。
-2. **端口占用**：启动前确保 3000（后端）和 5173（前端）未被占用；可通过 `lsof -iTCP:3000 -sTCP:LISTEN` 检查。
-3. **数据安全**：`server/data/` 下存放 SQLite 数据库与案件资料，含敏感信息，已通过 `.gitignore` 排除，不会上传 GitHub。
-4. **文书模板**：`ANLI_TEMPLATES_DIR` 指向的目录为本机路径，项目仓库不保存模板文件；如换电脑需重新配置路径或同步模板目录。
-5. **AI 助手**：依赖 Ollama 或外部 API，两者都未配置时 AI Tab 会提示连接失败，不影响其他功能。
-6. **停止服务**：在运行 `npm run dev` 的终端按 `Ctrl+C` 即可停止前后端。
+2. **Python 版本**：Docling/PaddleOCR/MinerU 引擎需要 Python 3.11+（系统自带 3.9 不兼容），通过 `brew install python@3.11` 安装。
+3. **端口占用**：启动前确保 3000（后端）和 5173（前端）未被占用；可通过 `lsof -iTCP:3000 -sTCP:LISTEN` 检查。
+4. **数据安全**：`server/data/` 下存放 SQLite 数据库与案件资料，含敏感信息，已通过 `.gitignore` 排除，不会上传 GitHub。
+5. **文书模板**：`ANLI_TEMPLATES_DIR` 指向的目录为本机路径，项目仓库不保存模板文件；如换电脑需重新配置路径或同步模板目录。
+6. **AI 助手**：依赖 Ollama 或外部 API，两者都未配置时 AI Tab 会提示连接失败，不影响其他功能。
+7. **停止服务**：在运行 `npm run dev` 的终端按 `Ctrl+C` 即可停止前后端。
 
 ## 八、项目结构
 
@@ -113,5 +121,9 @@ AnLi/
 - 待办事项：列表/日历视图、可关联案件或个人待办、开庭自动生成高优待办
 - 文书模板库浏览、从模板/其他案件复制文书到当前案件
 - 评论与 AI 助手右侧双 Tab 面板
-- OCR 文字识别（依赖 macOS Vision）
+- OCR 文字识别：
+  - 多引擎：RapidOCR / PaddleOCR / Docling / Vision（MinerU 已下线）
+  - PDF 预压缩（ghostscript，三档）
+  - 断点续做、任务暂停/恢复/取消
+  - 调度器一键重置（🔄 按钮，解决所有任务卡死）
 - 审计日志、用户管理、权限控制

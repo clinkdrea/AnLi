@@ -1,3 +1,19 @@
+// ======== 进程级异常保护 ========
+// 避免 uncaughtException / unhandledRejection 静默杀进程（之前后端子进程崩了没人知道原因）
+process.on('uncaughtException', (err, origin) => {
+  console.error('\n========== UNCAUGHT EXCEPTION ==========');
+  console.error(err);
+  console.error('Origin:', origin);
+  console.error('========================================\n');
+  // 不退出进程，让服务继续跑
+});
+process.on('unhandledRejection', (reason: any, promise) => {
+  console.error('\n========== UNHANDLED PROMISE REJECTION ==========');
+  console.error('Reason:', reason);
+  console.error('Stack:', reason?.stack || 'no stack');
+  console.error('===============================================\n');
+});
+
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import cookie from '@fastify/cookie';
@@ -26,6 +42,7 @@ import auditRoutes from './routes/audit.js';
 import notificationRoutes from './routes/notifications.js';
 import exportRoutes from './routes/export.js';
 import aiAgentRoutes from './routes/ai-agent.js';
+import ocrRoutes, { initOcrRecovery, runOcrRetentionCleanup } from './routes/ocr.js';
 import { startOCRWorker } from './services/ocr.js';
 import { scanTemplates } from './services/templates-scan.js';
 import { runStartupCleanup } from './services/cleanup.js';
@@ -55,7 +72,8 @@ app.addHook('onResponse', async (req, reply) => {
 
 await app.register(cors, { origin: true, credentials: true });
 await app.register(cookie);
-await app.register(multipart, { limits: { fileSize: 500 * 1024 * 1024 } });
+// OCR 大文件上传：放宽到 10GB，超大文件用本地路径直指定接口
+await app.register(multipart, { limits: { fileSize: 10 * 1024 * 1024 * 1024, files: 10 } });
 
 initDb();
 seed();
@@ -94,9 +112,32 @@ await app.register(auditRoutes);
 await app.register(notificationRoutes);
 await app.register(exportRoutes);
 await app.register(aiAgentRoutes);
+await app.register(ocrRoutes);
 
 // 启动 OCR 后台队列
-startOCRWorker();
+try {
+  startOCRWorker();
+} catch (e: any) {
+  console.error('[OCR] 启动后台队列失败（不影响主服务）:', e?.message);
+}
+
+// OCR 断点续做：恢复上次服务关闭时未完成的任务
+try {
+  initOcrRecovery();
+} catch (e: any) {
+  console.error('[OCR] 恢复未完成任务失败（不影响主服务）:', e?.message);
+}
+
+// OCR 任务自动过期清理（默认 14 天）
+try {
+  const { deleted, dirs } = runOcrRetentionCleanup(true);
+  if (deleted > 0) console.log(`[OCR Retention] 启动清理: 删除 ${deleted} 条任务 + ${dirs.length} 个目录`);
+} catch (e: any) {
+  console.error('[OCR Retention] 启动清理失败（不影响主服务）:', e?.message);
+}
+setInterval(() => {
+  try { runOcrRetentionCleanup(); } catch (e: any) { /* 后台定时任务出错不应该影响服务 */ }
+}, 60 * 60 * 1000);
 
 const PORT = config.PORT;
 app.listen({ port: PORT, host: '0.0.0.0' }, (err, address) => {

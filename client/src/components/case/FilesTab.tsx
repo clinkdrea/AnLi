@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Upload, Download, Trash2, FileText, Image, FileArchive, Copy, FolderInput, FolderOpen, RefreshCw, X, Search, ChevronRight, Eye, Pencil } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Upload, Download, Trash2, FileText, Image, FileArchive, Copy, FolderInput, FolderOpen, RefreshCw, X, Search, ChevronRight, ChevronDown, Eye, Pencil, FileScan, Folder, FolderTree, List, ChevronsDown, ChevronsUp } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import { api } from '../../api';
 import OcrActions, { isImageFile } from './OcrActions';
 import { RenameFileModal } from './RenameFile';
@@ -17,6 +18,65 @@ function formatSize(bytes: number) {
   return (bytes / 1024 / 1024).toFixed(1) + ' MB';
 }
 
+// 目录树节点：按 rel_path 的 "/" 分段构建
+interface DirNode {
+  name: string;
+  path: string;
+  dirs: Map<string, DirNode>;
+  files: any[];
+}
+
+function emptyNode(name = '', path = ''): DirNode {
+  return { name, path, dirs: new Map(), files: [] };
+}
+
+// 按 rel_path（含子目录）构建树；目录与文件均按名称排序
+function buildTree(files: any[]): DirNode {
+  const root = emptyNode();
+  for (const f of files) {
+    const rel = String(f.rel_path || f.file_name || '');
+    const parts = rel.split('/').filter(Boolean);
+    if (parts.length === 0) continue;
+    let node = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const p = parts[i];
+      if (!node.dirs.has(p)) node.dirs.set(p, emptyNode(p, parts.slice(0, i + 1).join('/')));
+      node = node.dirs.get(p)!;
+    }
+    node.files.push(f);
+  }
+  const byName = (a: string, b: string) => a.localeCompare(b, 'zh-Hans-CN');
+  const sortNode = (n: DirNode) => {
+    n.files.sort((a, b) => byName(String(a.file_name || ''), String(b.file_name || '')));
+    for (const d of n.dirs.values()) sortNode(d);
+  };
+  sortNode(root);
+  // 目录 Map 保持插入顺序，渲染前排序一次
+  const reorder = (n: DirNode) => {
+    const entries = [...n.dirs.entries()].sort((a, b) => byName(a[0], b[0]));
+    n.dirs = new Map(entries);
+    for (const d of n.dirs.values()) reorder(d);
+  };
+  reorder(root);
+  return root;
+}
+
+// 统计目录（含子目录）下的文件数
+function countFiles(n: DirNode): number {
+  let c = n.files.length;
+  for (const d of n.dirs.values()) c += countFiles(d);
+  return c;
+}
+
+// 收集全部目录路径（用于全展开）
+function collectDirPaths(n: DirNode, out: string[] = []): string[] {
+  for (const d of n.dirs.values()) {
+    out.push(d.path);
+    collectDirPaths(d, out);
+  }
+  return out;
+}
+
 export default function FilesTab({ caseId, onChanged }: { caseId: string; onChanged?: () => void }) {
   const [files, setFiles] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
@@ -26,6 +86,32 @@ export default function FilesTab({ caseId, onChanged }: { caseId: string; onChan
   const [tip, setTip] = useState('');
   const [renaming, setRenaming] = useState<any>(null);
   const [refreshing, setRefreshing] = useState(false);
+  // 视图：平铺列表 / 树状（按文件夹层级）。偏好记在本地
+  const [view, setView] = useState<'list' | 'tree'>(
+    () => (localStorage.getItem('files_view') === 'tree' ? 'tree' : 'list'));
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const initRef = useRef(false);
+
+  const tree = useMemo(() => buildTree(files), [files]);
+  const allDirPaths = useMemo(() => collectDirPaths(tree), [tree]);
+
+  // 切换案件时重置展开状态；首次加载后默认展开第一层文件夹
+  useEffect(() => { initRef.current = false; setExpanded(new Set()); }, [caseId]);
+  useEffect(() => {
+    if (initRef.current || tree.dirs.size === 0) return;
+    initRef.current = true;
+    setExpanded(new Set([...tree.dirs.values()].map((d) => d.path)));
+  }, [tree]);
+
+  const changeView = (v: 'list' | 'tree') => {
+    setView(v);
+    localStorage.setItem('files_view', v);
+  };
+  const toggleDir = (p: string) => setExpanded((s) => {
+    const n = new Set(s);
+    if (n.has(p)) n.delete(p); else n.add(p);
+    return n;
+  });
 
   // sync=true 时先扫描案件文件夹，使磁盘上的增删改反映到列表（打开/刷新/操作后用）
   const load = (sync = false) =>
@@ -98,11 +184,103 @@ export default function FilesTab({ caseId, onChanged }: { caseId: string; onChan
     }
   };
 
+  // 单个文件行（列表视图与树状视图共用；depth 控制树状视图的缩进）
+  const fileRow = (f: any, depth = 0) => (
+    <tr key={f.id} className="border-t hover:bg-slate-50">
+      <td className="px-4 py-3" style={depth > 0 ? { paddingLeft: 16 + depth * 18 + 18 } : undefined}>
+        <div className="flex items-center gap-2">
+          <FileIcon name={f.file_name} />
+          <button onClick={() => openLocal(f.id, f.file_name)}
+            className="text-slate-700 hover:text-amber-600 hover:underline truncate max-w-[320px]"
+            title={`${f.rel_path || f.file_name}（用本地应用打开）`}>
+            {f.file_name}
+          </button>
+        </div>
+      </td>
+      <td className="px-4 py-3 text-slate-500">{formatSize(f.size)}</td>
+      <td className="px-4 py-3 text-slate-500">{f.uploader_name || '外部导入'}</td>
+      <td className="px-4 py-3">
+        <OcrActions file={f} size="cell" onChanged={load} />
+      </td>
+      <td className="px-4 py-3">
+        <div className="flex gap-2">
+          <button onClick={() => openLocal(f.id, f.file_name)}
+            className="text-slate-500 hover:text-amber-600 flex items-center gap-1">
+            <Eye className="w-3.5 h-3.5" /> 打开
+          </button>
+          <a href={`/api/files/${f.id}/download`} className="text-blue-600 hover:underline flex items-center gap-1">
+            <Download className="w-3 h-3" /> 下载
+          </a>
+          <button onClick={() => setRenaming(f)}
+            className="text-slate-500 hover:text-amber-600 flex items-center gap-1">
+            <Pencil className="w-3.5 h-3.5" /> 重命名
+          </button>
+          <button onClick={() => del(f.id, f.file_name)} className="text-red-500 hover:underline flex items-center gap-1">
+            <Trash2 className="w-3 h-3" /> 删除
+          </button>
+        </div>
+      </td>
+    </tr>
+  );
+
+  // 文件夹行：整行可点击展开/折叠
+  const dirRow = (d: DirNode, depth: number) => {
+    const open = expanded.has(d.path);
+    return (
+      <tr key={`dir:${d.path}`}
+        className="border-t bg-slate-50/70 hover:bg-slate-100 cursor-pointer select-none"
+        onClick={() => toggleDir(d.path)}>
+        <td colSpan={5} className="px-4 py-2.5" style={depth > 0 ? { paddingLeft: 16 + depth * 18 } : undefined}>
+          <div className="flex items-center gap-2 text-slate-700">
+            {open ? <ChevronDown className="w-4 h-4 text-slate-400" /> : <ChevronRight className="w-4 h-4 text-slate-400" />}
+            {open ? <FolderOpen className="w-5 h-5 text-amber-500" /> : <Folder className="w-5 h-5 text-amber-500" />}
+            <span className="font-medium">{d.name}</span>
+            <span className="text-xs text-slate-400">{countFiles(d)} 个文件</span>
+          </div>
+        </td>
+      </tr>
+    );
+  };
+
+  // 递归渲染目录树（仅渲染已展开目录的子节点）
+  const dirRows = (node: DirNode, depth: number): ReactNode[] => {
+    const rows: ReactNode[] = [];
+    for (const d of node.dirs.values()) {
+      rows.push(dirRow(d, depth));
+      if (expanded.has(d.path)) rows.push(...dirRows(d, depth + 1));
+    }
+    for (const f of node.files) rows.push(fileRow(f, depth));
+    return rows;
+  };
+
   return (
     <div>
       <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
-        <p className="text-sm text-slate-500">文件实际存放在案件文件夹中（支持 PDF / Word / Excel / 图片等）；在文件夹内增删改文件后，点「刷新」即同步到本列表。图片可 OCR 识别。</p>
-        <div className="flex gap-2">
+        <p className="text-sm text-slate-500">文件实际存放在案件文件夹中（支持 PDF / Word / Excel / 图片等）；可按列表或文件夹树状查看，在文件夹内增删改文件后点「刷新」即同步。图片可 OCR 识别。</p>
+        <div className="flex gap-2 flex-wrap items-center">
+          {/* 视图切换：平铺列表 / 文件夹树 */}
+          <div className="flex items-center border rounded overflow-hidden text-sm">
+            <button onClick={() => changeView('list')} title="平铺列表"
+              className={`flex items-center gap-1 px-2.5 py-2 ${view === 'list' ? 'bg-amber-500 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>
+              <List className="w-4 h-4" /> 列表
+            </button>
+            <button onClick={() => changeView('tree')} title="按文件夹层级展示"
+              className={`flex items-center gap-1 px-2.5 py-2 ${view === 'tree' ? 'bg-amber-500 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>
+              <FolderTree className="w-4 h-4" /> 树状
+            </button>
+          </div>
+          {view === 'tree' && (
+            <div className="flex items-center gap-1">
+              <button onClick={() => setExpanded(new Set(allDirPaths))}
+                className="flex items-center gap-1 border px-2.5 py-2 rounded text-sm hover:bg-slate-50">
+                <ChevronsDown className="w-4 h-4" /> 全展开
+              </button>
+              <button onClick={() => setExpanded(new Set())}
+                className="flex items-center gap-1 border px-2.5 py-2 rounded text-sm hover:bg-slate-50">
+                <ChevronsUp className="w-4 h-4" /> 全折叠
+              </button>
+            </div>
+          )}
           <button onClick={openFolder}
             className="flex items-center gap-1 border px-3 py-2 rounded text-sm hover:bg-slate-50">
             <FolderOpen className="w-4 h-4" /> 打开文件夹
@@ -123,6 +301,10 @@ export default function FilesTab({ caseId, onChanged }: { caseId: string; onChan
             className="flex items-center gap-1 bg-amber-500 hover:bg-amber-600 text-white px-4 py-2 rounded text-sm">
             <Upload className="w-4 h-4" /> 上传文件
           </button>
+          <Link to={`/ocr?case=${caseId}`}
+            className="flex items-center gap-1 border border-amber-400 text-amber-600 hover:bg-amber-50 px-3 py-2 rounded text-sm">
+            <FileScan className="w-4 h-4" /> OCR 中心
+          </Link>
           <input ref={inputRef} type="file" multiple className="hidden" onChange={upload} />
         </div>
       </div>
@@ -141,43 +323,7 @@ export default function FilesTab({ caseId, onChanged }: { caseId: string; onChan
             </tr>
           </thead>
           <tbody>
-            {files.map((f) => (
-              <tr key={f.id} className="border-t hover:bg-slate-50">
-                <td className="px-4 py-3">
-                  <div className="flex items-center gap-2">
-                    <FileIcon name={f.file_name} />
-                    <button onClick={() => openLocal(f.id, f.file_name)}
-                      className="text-slate-700 hover:text-amber-600 hover:underline truncate max-w-[320px]"
-                      title={`用本地应用打开 ${f.file_name}`}>
-                      {f.file_name}
-                    </button>
-                  </div>
-                </td>
-                <td className="px-4 py-3 text-slate-500">{formatSize(f.size)}</td>
-                <td className="px-4 py-3 text-slate-500">{f.uploader_name || '外部导入'}</td>
-                <td className="px-4 py-3">
-                  <OcrActions file={f} size="cell" onChanged={load} />
-                </td>
-                <td className="px-4 py-3">
-                  <div className="flex gap-2">
-                    <button onClick={() => openLocal(f.id, f.file_name)}
-                      className="text-slate-500 hover:text-amber-600 flex items-center gap-1">
-                      <Eye className="w-3.5 h-3.5" /> 打开
-                    </button>
-                    <a href={`/api/files/${f.id}/download`} className="text-blue-600 hover:underline flex items-center gap-1">
-                      <Download className="w-3 h-3" /> 下载
-                    </a>
-                    <button onClick={() => setRenaming(f)}
-                      className="text-slate-500 hover:text-amber-600 flex items-center gap-1">
-                      <Pencil className="w-3.5 h-3.5" /> 重命名
-                    </button>
-                    <button onClick={() => del(f.id, f.file_name)} className="text-red-500 hover:underline flex items-center gap-1">
-                      <Trash2 className="w-3 h-3" /> 删除
-                    </button>
-                  </div>
-                </td>
-              </tr>
-            ))}
+            {view === 'list' ? files.map((f) => fileRow(f)) : dirRows(tree, 0)}
           </tbody>
         </table>
         {files.length === 0 && <div className="p-8 text-center text-slate-400">暂无文件，可上传或从模板/其他案件复制</div>}
@@ -194,6 +340,7 @@ export default function FilesTab({ caseId, onChanged }: { caseId: string; onChan
           onClose={() => setRenaming(null)}
           onRenamed={() => { setRenaming(null); reloadAll(); }} />
       )}
+
     </div>
   );
 }

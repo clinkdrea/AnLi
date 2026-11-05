@@ -17,6 +17,7 @@ import Users from './pages/Users';
 import BoardTemplates from './pages/BoardTemplates';
 import Settings from './pages/Settings';
 import Profile from './pages/Profile';
+import OcrCenterPage from './components/case/OcrCenter';
 
 export default function App() {
   const [user, setUser] = useState<any>(null);
@@ -39,6 +40,7 @@ export default function App() {
         <Route path="/search" element={<Search />} />
         <Route path="/conflicts" element={<Conflict />} />
         <Route path="/ai-assistant" element={<AIAssistant />} />
+        <Route path="/ocr" element={<OcrCenterPage />} />
         <Route path="/templates" element={<Templates />} />
         <Route path="/knowledge" element={<Knowledge />} />
         <Route path="/audit" element={<Audit />} />

@@ -6,6 +6,7 @@ import { Settings2, FolderOpen, Save } from 'lucide-react';
 export default function Settings() {
   const [root, setRoot] = useState('');
   const [tplRoot, setTplRoot] = useState('');
+  const [ocrAuto, setOcrAuto] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState('');
@@ -16,6 +17,7 @@ export default function Settings() {
       .then((d: any) => {
         setRoot(d.settings?.cases_root || '');
         setTplRoot(d.settings?.templates_root || '');
+        setOcrAuto(!!d.settings?.ocr_auto);
       })
       .catch((e: any) => setErr(e.message))
       .finally(() => setLoading(false));
@@ -24,7 +26,7 @@ export default function Settings() {
   const save = async () => {
     setSaving(true); setMsg(''); setErr('');
     try {
-      await api('/settings', { method: 'PUT', body: JSON.stringify({ cases_root: root, templates_root: tplRoot }) });
+      await api('/settings', { method: 'PUT', body: JSON.stringify({ cases_root: root, templates_root: tplRoot, ocr_auto: ocrAuto }) });
       setMsg('已保存');
       setTimeout(() => setMsg(''), 3000);
     } catch (e: any) {
@@ -64,6 +66,21 @@ export default function Settings() {
             disabled={loading}
             placeholder="留空使用默认目录，或填写绝对路径，如 /Volumes/共享盘/律师文书模板"
             className={`w-full ${INPUT}`} />
+        </div>
+
+        <div className="mt-6 border-t pt-5">
+          <label className="flex items-start gap-2 cursor-pointer">
+            <input type="checkbox" checked={ocrAuto} disabled={loading}
+              onChange={(e) => setOcrAuto(e.target.checked)}
+              className="mt-0.5 w-4 h-4 accent-amber-500" />
+            <span>
+              <span className="text-sm font-medium text-slate-700 block">自动 OCR 新入库图片</span>
+              <span className="text-xs text-slate-400 block mt-0.5">
+                开启后，后台每 30 秒扫描一次，对尚未识别的图片自动执行 OCR。
+                默认关闭：关闭时可用文书列表里的「识别」按钮或「OCR 中心」手动处理。大批量截图/录像帧建议保持关闭，避免占满 CPU。
+              </span>
+            </span>
+          </label>
         </div>
 
         <div className="flex items-center gap-3 mt-6">
