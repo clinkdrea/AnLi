@@ -1,17 +1,14 @@
 import type { FastifyInstance } from 'fastify';
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
 import { db, DATA_DIR } from '../db/schema.js';
-import { config } from '../config.js';
 import { isCaseMember } from '../plugins/auth.js';
 import { logAudit } from '../services/audit.js';
-import { caseDir } from '../services/settings.js';
 
-const EXPORT_DIR = config.EXPORTS_DIR || path.join(DATA_DIR, 'exports');
+const EXPORT_DIR = path.join(DATA_DIR, 'exports');
 
 export default async function exportRoutes(app: FastifyInstance) {
-  // 导出案件（打包资料文件夹 + 完整元数据 JSON 为 zip）
+  // 导出案件元数据（纯 JSON，不碰文件系统）
   app.get('/api/cases/:id/export', async (req, reply) => {
     const cid = Number((req.params as any).id);
     if (req.user!.role !== 'admin' && !isCaseMember(req.user!.id, cid)) {
@@ -38,7 +35,7 @@ export default async function exportRoutes(app: FastifyInstance) {
     // ---- 阶段 ----
     const stages = db.prepare('SELECT * FROM case_stages WHERE case_id = ? ORDER BY sort_order').all(cid);
 
-    // ---- 任务（带处理人姓名 + 多处理人列表） ----
+    // ---- 任务 ----
     const tasks = db.prepare(`
       SELECT t.*, u.name AS assignee_name, s.name AS stage_name
       FROM tasks t
@@ -65,7 +62,7 @@ export default async function exportRoutes(app: FastifyInstance) {
       ORDER BY n.stage_id IS NULL, n.stage_id, n.sort_order, n.created_at
     `).all(cid);
 
-    // ---- 评论（带作者姓名 + 归属目标名称） ----
+    // ---- 评论 ----
     const comments = db.prepare(`
       SELECT c.*, u.name AS author_name,
         s.name AS stage_name, t.title AS task_title
@@ -83,18 +80,18 @@ export default async function exportRoutes(app: FastifyInstance) {
     // ---- 利益冲突报告 ----
     const conflicts = db.prepare('SELECT * FROM conflict_reports WHERE case_id = ? ORDER BY created_at DESC').all(cid);
 
-    // ---- 文书清单 + OCR 文本 ----
+    // ---- 文书清单（只拿元信息，不拿 OCR 文本 —— 用户说文书资料不需要）----
     const files = db.prepare(`
-      SELECT fr.*, fo.ocr_status, fo.ocr_text,
+      SELECT fr.id, fr.case_id, fr.rel_path, fr.file_name, fr.mime_type, fr.size,
+        fr.category, fr.uploaded_by, fr.created_at,
         u.name AS uploader_name
       FROM file_records fr
-      LEFT JOIN file_ocr_text fo ON fo.file_id = fr.id
       LEFT JOIN users u ON fr.uploaded_by = u.id
       WHERE fr.case_id = ?
       ORDER BY fr.rel_path
     `).all(cid);
 
-    // 解析 mentions JSON 字符串为数组
+    // 解析 mentions JSON
     for (const c of comments) {
       if (typeof c.mentions === 'string') {
         try { c.mentions = JSON.parse(c.mentions); } catch { c.mentions = null; }
@@ -119,33 +116,21 @@ export default async function exportRoutes(app: FastifyInstance) {
       exported_by_id: req.user!.id,
     };
 
+    // 清理 caseRow 中不想暴露的内部字段（比如 folder_path 可能含敏感路径）
+    const exportCase = { ...caseRow };
+    delete exportCase.folder_path;
+    metadata.case = exportCase;
+
     if (!fs.existsSync(EXPORT_DIR)) fs.mkdirSync(EXPORT_DIR, { recursive: true });
 
-    const zipName = `${caseRow.case_no}-${caseRow.name}.zip`;
-    const zipPath = path.join(EXPORT_DIR, zipName);
+    const baseName = `${caseRow.case_no}-${caseRow.name}`.replace(/[\\/:*?"<>|]/g, '_');
+    const jsonPath = path.join(EXPORT_DIR, `${baseName}.json`);
+    fs.writeFileSync(jsonPath, JSON.stringify(metadata, null, 2), 'utf-8');
 
-    // 写入元数据 JSON 到案件文件夹（临时）
-    const dir = caseDir(caseRow.folder_path);
-    const metaPath = path.join(dir, '_案件元数据.json');
-    fs.writeFileSync(metaPath, JSON.stringify(metadata, null, 2), 'utf-8');
+    logAudit(req.user!.id, 'case_export', 'case', cid, `tasks=${tasks.length} notes=${notes.length} comments=${comments.length} files=${files.length}`);
 
-    // 使用系统 zip 命令打包
-    try {
-      execFileSync('zip', ['-r', zipPath, '.'], { cwd: dir, stdio: 'pipe' });
-    } catch (err: any) {
-      // 清理临时元数据
-      if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
-      const msg = err?.stderr?.toString() || err?.message || '';
-      return reply.status(500).send({ error: `打包失败：${msg.slice(0, 200)}` });
-    } finally {
-      // 清理临时元数据文件
-      if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
-    }
-
-    logAudit(req.user!.id, 'case_export', 'case', cid, `files=${files.length} comments=${comments.length} tasks=${tasks.length}`);
-
-    reply.header('Content-Type', 'application/zip');
-    reply.header('Content-Disposition', `attachment; filename="${encodeURIComponent(zipName)}"`);
-    return reply.send(fs.createReadStream(zipPath));
+    reply.header('Content-Type', 'application/json; charset=utf-8');
+    reply.header('Content-Disposition', `attachment; filename="${encodeURIComponent(baseName)}.json"`);
+    return reply.send(fs.createReadStream(jsonPath));
   });
 }

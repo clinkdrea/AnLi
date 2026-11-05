@@ -31,7 +31,7 @@ export default function TasksTab({ caseId, onOpenTask }: { caseId: string; onOpe
       .then((d) => setTasks(d.tasks || []));
   };
   useEffect(() => { load(); }, [caseId, sortBy, order]);
-  useEffect(() => { api('/users/assignable').then((d) => setUsers(d.users || [])).catch(() => {}); }, []);
+  useEffect(() => { api(`/cases/${caseId}/members`).then((d) => setUsers(d.members || [])).catch(() => {}); }, [caseId]);
 
   const create = async () => {
     if (!title.trim()) return;

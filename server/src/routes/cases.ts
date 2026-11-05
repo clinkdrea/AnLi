@@ -361,6 +361,21 @@ export default async function caseRoutes(app: FastifyInstance) {
     return { users };
   });
 
+  // 案件成员列表（任务处理人只能从案件成员中选择）
+  app.get('/api/cases/:id/members', async (req, reply) => {
+    const cid = Number((req.params as any).id);
+    if (req.user!.role !== 'admin' && !isCaseMember(req.user!.id, cid)) {
+      return reply.status(403).send({ error: '无权访问' });
+    }
+    const members = db.prepare(
+      `SELECT u.id, u.name, u.role FROM case_members cm
+       JOIN users u ON cm.user_id = u.id
+       WHERE cm.case_id = ? AND u.status = 'active'
+       ORDER BY u.id`
+    ).all(cid);
+    return { members };
+  });
+
   // 添加成员
   app.post('/api/cases/:id/members', async (req, reply) => {
     const { id } = req.params as { id: string };

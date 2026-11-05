@@ -95,14 +95,14 @@ export default function BoardTab({ caseId, onOpenTask }: { caseId: string; onOpe
   const load = async () => {
     setLoading(true);
     try {
-      const [sd, td, ud] = await Promise.all([
+      const [sd, td, md] = await Promise.all([
         api(`/cases/${caseId}/stages`),
         api(`/cases/${caseId}/tasks?board=1&include_expired=1`),
-        api('/users/assignable').catch(() => ({ users: [] })),
+        api(`/cases/${caseId}/members`).catch(() => ({ members: [] })),
       ]);
       setStages(sd.stages || []);
       setTasks(td.tasks || []);
-      setUsers(ud.users || []);
+      setUsers(md.members || []);
     } catch {} finally { setLoading(false); }
   };
   useEffect(() => { load(); }, [caseId]);

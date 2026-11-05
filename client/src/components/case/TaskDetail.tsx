@@ -7,8 +7,9 @@ import AssigneeSelect, { isTaskOverdue } from './AssigneeSelect';
 const INPUT = 'border border-slate-300 rounded px-2.5 py-1.5 text-sm w-full focus:outline-none focus:ring-1 focus:ring-amber-400';
 const STATUS_LABEL: Record<string, string> = { todo: '待处理', doing: '进行中', done: '已完成', expired: '已过期' };
 
-export default function TaskDetail({ taskId, onClose, onChanged }: {
+export default function TaskDetail({ taskId, caseId, onClose, onChanged }: {
   taskId: number;
+  caseId?: string;
   onClose: () => void;
   onChanged?: () => void;
 }) {
@@ -39,9 +40,13 @@ export default function TaskDetail({ taskId, onClose, onChanged }: {
   };
 
   useEffect(() => {
-    Promise.all([load().catch((e) => setErr(e.message)), api('/users/assignable').catch(() => ({ users: [] }))])
-      .then(([, ud]) => setUsers((ud as any).users || []));
-  }, [taskId]);
+    // 处理人只能从案件成员中选；caseId 缺省时退回空列表
+    const membersReq = caseId
+      ? api(`/cases/${caseId}/members`).catch(() => ({ members: [] }))
+      : Promise.resolve({ members: [] });
+    Promise.all([load().catch((e) => setErr(e.message)), membersReq])
+      .then(([, md]) => setUsers((md as any).members || []));
+  }, [taskId, caseId]);
 
   // Esc 关闭
   useEffect(() => {

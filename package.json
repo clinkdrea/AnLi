@@ -9,6 +9,7 @@
   ],
   "scripts": {
     "dev": "concurrently -n server,client -c blue,green --restart-tries -1 --restart-after 2000 --kill-others-on-fail \"npm run dev -w server\" \"npm run dev -w client\"",
+    "stop": "pkill -f 'tsx watch src/index.ts'; pkill -f 'node dist/index.js'; pkill -f 'concurrently'; pkill -f 'vite/bin/vite.js'; kill -9 $(lsof -tiTCP:3000 -sTCP:LISTEN) 2>/dev/null; kill -9 $(lsof -tiTCP:5173 -sTCP:LISTEN) 2>/dev/null; echo 案理前后端已全部停止",
     "build": "npm run build -w server && npm run build -w client",
     "start": "npm run start -w server"
   },

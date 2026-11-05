@@ -103,7 +103,7 @@ export default function CaseDetail() {
 
       {/* 任务二级页面 */}
       {openTaskId != null && (
-        <TaskDetail taskId={openTaskId}
+        <TaskDetail taskId={openTaskId} caseId={id!}
           onClose={() => setOpenTaskId(null)}
           onChanged={reloadBoard} />
       )}

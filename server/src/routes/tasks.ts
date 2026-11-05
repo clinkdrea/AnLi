@@ -87,7 +87,16 @@ export default async function taskRoutes(app: FastifyInstance) {
     }
     const b = req.body as any;
     if (!b.title?.trim()) return reply.status(400).send({ error: '任务标题必填' });
-    const assigneeIds = resolveAssigneeIds(b.assignee_ids ?? b.assignee_id, req.user!.id);
+    let assigneeIds = resolveAssigneeIds(b.assignee_ids ?? b.assignee_id, req.user!.id);
+    // 处理人必须是案件成员
+    if (Array.isArray(b.assignee_ids) || b.assignee_id != null) {
+      const memberIds = new Set(
+        (db.prepare('SELECT user_id FROM case_members WHERE case_id = ?').all(cid) as any[]).map((r) => r.user_id)
+      );
+      const validIds = assigneeIds.filter((id: number) => memberIds.has(id));
+      if (!validIds.length) return reply.status(400).send({ error: '处理人必须是案件成员' });
+      assigneeIds = validIds;
+    }
     const status = ['todo', 'doing', 'done'].includes(b.status) ? b.status : 'todo';
     const priority = ['high', 'medium', 'low'].includes(b.priority) ? b.priority : 'medium';
     // 排到所在阶段（或未分配）末尾
@@ -258,9 +267,13 @@ export default async function taskRoutes(app: FastifyInstance) {
       db.prepare(`UPDATE tasks SET ${fields.join(', ')} WHERE id = ?`).run(...params);
     }
 
-    // 处理人多选更新
+    // 处理人多选更新（只能是案件成员）
     if (Array.isArray(b.assignee_ids)) {
-      const ids = resolveAssigneeIds(b.assignee_ids, uid);
+      const memberIds = new Set(
+        (db.prepare('SELECT user_id FROM case_members WHERE case_id = ?').all(task.case_id) as any[]).map((r) => r.user_id)
+      );
+      const ids = resolveAssigneeIds(b.assignee_ids, uid).filter((id: number) => memberIds.has(id));
+      if (!ids.length) return reply.status(400).send({ error: '处理人必须是案件成员' });
       db.prepare('DELETE FROM task_assignees WHERE task_id = ?').run(tid);
       const insTA = db.prepare('INSERT OR IGNORE INTO task_assignees (task_id, user_id) VALUES (?, ?)');
       for (const x of ids) insTA.run(tid, x);
